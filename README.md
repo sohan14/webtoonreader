@@ -9,6 +9,10 @@ Android app for reading Webtoon pages from **PDF** or **image files**.
 - Read pages aloud with Android Text-To-Speech (configured to prefer female voices when available).
 - Error log section in UI for failed file/page processing.
 
+## Build requirements
+- JDK 17
+- Gradle 8.7
+
 ## Run locally
 ```bash
 gradle :app:assembleDebug
