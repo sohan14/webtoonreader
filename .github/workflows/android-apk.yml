@@ -1,13 +1,15 @@
-name: Build Android APK
+name: Android CI Build
 
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  build:
+  verify-and-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -19,7 +21,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
@@ -27,11 +29,34 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Run debug build (capture logs)
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          gradle :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee ci-logs/assembleDebug.log
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ci-logs/assembleDebug.log
 
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: webtoon-reader-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build failure summary
+        if: failure()
+        run: |
+          echo "❌ Build failed. Download the build-logs artifact and inspect assembleDebug.log" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build success summary
+        if: success()
+        run: |
+          echo "✅ Build succeeded. APK artifact: webtoon-reader-debug-apk" >> $GITHUB_STEP_SUMMARY

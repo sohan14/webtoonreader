@@ -21,10 +21,13 @@ gradle :app:assembleDebug
 Debug APK output:
 `app/build/outputs/apk/debug/app-debug.apk`
 
-## GitHub Pipeline
+## GitHub auto-build and error detection
 Workflow file: `.github/workflows/android-apk.yml`
 
-It builds the debug APK on every push/PR and uploads it as an artifact named:
-`webtoon-reader-debug-apk`
+On every push/PR (and manual dispatch), the pipeline:
+1. builds `:app:assembleDebug`
+2. uploads build logs as `build-logs` (always)
+3. uploads APK as `webtoon-reader-debug-apk` (on success)
+4. writes build status to the workflow summary
 
-Download the APK artifact from the workflow run, install it on Android, and test.
+If build fails, download `build-logs` and share `assembleDebug.log`.
