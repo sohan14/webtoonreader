@@ -32,5 +32,9 @@ On every push/PR (and manual dispatch), the pipeline:
 4. uploads build logs as `build-logs` (always)
 5. uploads APK as `webtoon-reader-debug-apk` (on success)
 6. writes build status to the workflow summary with quick error summary lines
+7. auto-opens/updates a PR with parsed failure report when CI fails
 
 If build fails, download `build-logs` and share `assembleDebug.log`.
+
+
+Auto-fix workflow: `.github/workflows/android-autofix-pr.yml`

@@ -80,12 +80,31 @@ jobs:
 
           retry gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
 
+      - name: Extract failure reason (always)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p ci-logs
+          if [ -f ci-logs/assembleDebug.log ]; then
+            grep -E "^\* What went wrong:|^FAILURE: Build failed|^Caused by:|Received status code|Execution failed for task|Could not resolve" ci-logs/assembleDebug.log | head -n 40 > ci-logs/failure-signature.txt || true
+            {
+              echo "### Build log quick summary"
+              echo ""
+              echo "Top error lines:"
+              cat ci-logs/failure-signature.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No assembleDebug.log found" > ci-logs/failure-signature.txt
+          fi
+
       - name: Upload build logs (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: ci-logs/assembleDebug.log
+          path: |
+            ci-logs/assembleDebug.log
+            ci-logs/failure-signature.txt
 
       - name: Upload APK artifact
         if: success()
@@ -93,19 +112,6 @@ jobs:
         with:
           name: webtoon-reader-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Extract failure reason (always)
-        if: always()
-        shell: bash
-        run: |
-          if [ -f ci-logs/assembleDebug.log ]; then
-            {
-              echo "### Build log quick summary"
-              echo ""
-              echo "Top error lines:"
-              grep -E "^\* What went wrong:|^FAILURE: Build failed|^Caused by:|Received status code|Execution failed for task|Could not resolve" ci-logs/assembleDebug.log | head -n 40 || true
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Build failure summary
         if: failure()

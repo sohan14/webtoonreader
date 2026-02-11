@@ -1,0 +1,71 @@
+name: Android CI Auto-Fix PR
+
+on:
+  workflow_run:
+    workflows: ["Android CI Build"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  propose-fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build log artifact from failed run
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_id: ${{ github.event.workflow_run.id }}
+          name: build-logs
+          path: ci-logs
+          if_no_artifact_found: warn
+
+      - name: Build auto-fix report
+        shell: bash
+        run: |
+          mkdir -p ci/auto-fix
+          {
+            echo "# Android CI Auto-Fix Report"
+            echo ""
+            echo "- Source run: ${{ github.event.workflow_run.html_url }}"
+            echo "- Trigger: ${{ github.event.workflow_run.event }}"
+            echo "- Branch: ${{ github.event.workflow_run.head_branch }}"
+            echo "- Commit: ${{ github.event.workflow_run.head_sha }}"
+            echo ""
+            echo "## Failure signature"
+            echo '```'
+            if [ -f ci-logs/failure-signature.txt ]; then
+              cat ci-logs/failure-signature.txt
+            else
+              echo "No failure-signature artifact found."
+            fi
+            echo '```'
+            echo ""
+            echo "## Suggested next checks"
+            echo "- Verify dependency repository availability (Google/Maven Central)."
+            echo "- Verify Android SDK components are installed and licenses accepted."
+            echo "- Inspect full artifact: build-logs/assembleDebug.log"
+          } > ci/auto-fix/latest-failure.md
+
+      - name: Create/Update auto-fix PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(ci): update android build failure auto-fix report"
+          branch: "ci/android-auto-fix"
+          title: "chore(ci): auto-fix report for failed Android CI run"
+          body: |
+            This PR was automatically generated from a failed **Android CI Build** run.
+
+            It includes a parsed failure signature and run metadata to speed up debugging.
+
+            Please review `ci/auto-fix/latest-failure.md` and apply code/config fixes as needed.
+          add-paths: |
+            ci/auto-fix/latest-failure.md
