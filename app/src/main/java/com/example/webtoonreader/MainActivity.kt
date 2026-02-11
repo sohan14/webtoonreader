@@ -40,6 +40,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -134,6 +135,9 @@ class MainActivity : ComponentActivity() {
                 var readerMode by remember { mutableStateOf(false) }
                 var currentReadingIndex by remember { mutableStateOf(0) }
                 var selectedVoiceName by remember { mutableStateOf<String?>(null) }
+                var castVoiceAName by remember { mutableStateOf<String?>(null) }
+                var castVoiceBName by remember { mutableStateOf<String?>(null) }
+                var characterCastEnabled by remember { mutableStateOf(true) }
                 var selectedEmotion by remember { mutableStateOf(emotionProfiles.first()) }
 
                 fun startReading(fromIndex: Int = 0) {
@@ -146,25 +150,61 @@ class MainActivity : ComponentActivity() {
                         AppLogStore.append(context, "ERROR", "Read requested but there are no pages loaded")
                         return
                     }
-                    speaker.voices
-                        ?.firstOrNull { it.name == selectedVoiceName }
-                        ?.let { speaker.voice = it }
-                    speaker.setSpeechRate(selectedEmotion.speechRate)
-                    speaker.setPitch(selectedEmotion.pitch)
+                    val voicesByName = speaker.voices.orEmpty().associateBy { it.name }
                     speaker.stop()
+                    var dialogueTurnIndex = 0
                     viewModel.state.pages.drop(fromIndex).forEachIndexed { idx, page ->
                         val absoluteIndex = fromIndex + idx
-                        val text = page.extractedText
-                            .normalizeForSpeech()
-                            .ifBlank { "No text found." }
-                        val utteranceId = "page_$absoluteIndex"
-                        speaker.speak(
-                            text,
-                            if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                            null,
-                            utteranceId
-                        )
-                        AppLogStore.append(context, "INFO", "Queued TTS $utteranceId (textLength=${text.length})")
+                        val rawSegments = page.extractedText.extractSpeechSegments()
+                        if (rawSegments.isEmpty()) {
+                            val fallbackText = "No text found."
+                            val utteranceId = "page_${absoluteIndex}_seg_0"
+                            voicesByName[selectedVoiceName]?.let { speaker.voice = it }
+                            speaker.setSpeechRate(selectedEmotion.speechRate)
+                            speaker.setPitch(selectedEmotion.pitch)
+                            speaker.speak(
+                                fallbackText,
+                                if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                                null,
+                                utteranceId
+                            )
+                            AppLogStore.append(context, "INFO", "Queued TTS $utteranceId (textLength=${fallbackText.length}, role=narrator)")
+                        } else {
+                            rawSegments.forEachIndexed { segIndex, rawSegment ->
+                                val normalized = rawSegment.normalizeForSpeech().ifBlank { "No text found." }
+                                val isDialogue = rawSegment.isLikelyDialogue()
+                                val speakerRole = if (characterCastEnabled && isDialogue) {
+                                    val role = if (dialogueTurnIndex % 2 == 0) "characterA" else "characterB"
+                                    dialogueTurnIndex++
+                                    role
+                                } else {
+                                    "narrator"
+                                }
+                                val selectedVoiceForSegment = when (speakerRole) {
+                                    "characterA" -> castVoiceAName ?: selectedVoiceName
+                                    "characterB" -> castVoiceBName ?: selectedVoiceName
+                                    else -> selectedVoiceName
+                                }
+                                voicesByName[selectedVoiceForSegment]?.let { speaker.voice = it }
+
+                                val tunedEmotion = selectedEmotion.tuneForSegment(normalized, speakerRole)
+                                speaker.setSpeechRate(tunedEmotion.speechRate)
+                                speaker.setPitch(tunedEmotion.pitch)
+
+                                val utteranceId = "page_${absoluteIndex}_seg_$segIndex"
+                                speaker.speak(
+                                    normalized,
+                                    if (idx == 0 && segIndex == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                                    null,
+                                    utteranceId
+                                )
+                                AppLogStore.append(
+                                    context,
+                                    "INFO",
+                                    "Queued TTS $utteranceId (textLength=${normalized.length}, role=$speakerRole, voice=${selectedVoiceForSegment ?: "default"})"
+                                )
+                            }
+                        }
                     }
                     isSpeaking = true
                     AppLogStore.append(context, "INFO", "Started reading from page ${fromIndex + 1}")
@@ -188,6 +228,8 @@ class MainActivity : ComponentActivity() {
                             if (femaleVoices.isNotEmpty()) {
                                 current.voice = femaleVoices.first()
                                 selectedVoiceName = femaleVoices.first().name
+                                castVoiceAName = femaleVoices.getOrNull(1)?.name ?: femaleVoices.first().name
+                                castVoiceBName = femaleVoices.getOrNull(2)?.name ?: femaleVoices.first().name
                             } else {
                                 current.language = Locale.US
                             }
@@ -202,7 +244,10 @@ class MainActivity : ComponentActivity() {
                     speaker.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             isSpeaking = true
-                            val index = utteranceId?.removePrefix("page_")?.toIntOrNull()
+                            val index = utteranceId
+                                ?.substringAfter("page_", "")
+                                ?.substringBefore("_seg_")
+                                ?.toIntOrNull()
                             if (index != null) currentReadingIndex = index
                         }
 
@@ -227,6 +272,9 @@ class MainActivity : ComponentActivity() {
                     HomeScreen(
                         state = viewModel.state,
                         selectedVoiceName = selectedVoiceName,
+                        castVoiceAName = castVoiceAName,
+                        castVoiceBName = castVoiceBName,
+                        characterCastEnabled = characterCastEnabled,
                         selectedEmotion = selectedEmotion,
                         availableFemaleVoiceNames = tts?.voices
                             ?.filter { it.isFemaleLikeVoice() }
@@ -235,6 +283,13 @@ class MainActivity : ComponentActivity() {
                             .orEmpty(),
                         onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
                         onSelectVoice = { selectedVoiceName = it },
+                        onCycleCastVoiceA = {
+                            castVoiceAName = nextVoiceName(castVoiceAName, it)
+                        },
+                        onCycleCastVoiceB = {
+                            castVoiceBName = nextVoiceName(castVoiceBName, it)
+                        },
+                        onToggleCharacterCast = { characterCastEnabled = it },
                         onSelectEmotion = { selectedEmotion = it },
                         onReadPages = {
                             readerMode = true
@@ -474,10 +529,16 @@ class ReaderViewModel : ViewModel() {
 private fun HomeScreen(
     state: ReaderUiState,
     selectedVoiceName: String?,
+    castVoiceAName: String?,
+    castVoiceBName: String?,
+    characterCastEnabled: Boolean,
     selectedEmotion: EmotionProfile,
     availableFemaleVoiceNames: List<String>,
     onPickFiles: (List<Uri>) -> Unit,
     onSelectVoice: (String) -> Unit,
+    onCycleCastVoiceA: (List<String>) -> Unit,
+    onCycleCastVoiceB: (List<String>) -> Unit,
+    onToggleCharacterCast: (Boolean) -> Unit,
     onSelectEmotion: (EmotionProfile) -> Unit,
     onReadPages: () -> Unit,
     onShareLogs: () -> Unit,
@@ -502,11 +563,23 @@ private fun HomeScreen(
             if (availableFemaleVoiceNames.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Voice:", fontWeight = FontWeight.Bold)
-                    availableFemaleVoiceNames.take(3).forEach { voiceName ->
+                    availableFemaleVoiceNames.take(6).forEach { voiceName ->
                         Button(onClick = { onSelectVoice(voiceName) }) {
                             val shortName = voiceName.takeLast(8)
                             Text(if (voiceName == selectedVoiceName) "✓ $shortName" else shortName)
                         }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Cast:", fontWeight = FontWeight.Bold)
+                    Switch(checked = characterCastEnabled, onCheckedChange = onToggleCharacterCast)
+                    Button(onClick = { onCycleCastVoiceA(availableFemaleVoiceNames) }, enabled = availableFemaleVoiceNames.isNotEmpty()) {
+                        Text("A: ${(castVoiceAName ?: selectedVoiceName ?: "Default").takeLast(8)}")
+                    }
+                    Button(onClick = { onCycleCastVoiceB(availableFemaleVoiceNames) }, enabled = availableFemaleVoiceNames.isNotEmpty()) {
+                        Text("B: ${(castVoiceBName ?: selectedVoiceName ?: "Default").takeLast(8)}")
                     }
                 }
             }
@@ -601,6 +674,54 @@ private fun String.normalizeForSpeech(): String {
         .replace(Regex("\\s+"), " ")
         .replace(Regex("\\s+([,.;:!?])"), "$1")
         .trim()
+}
+
+private fun String.extractSpeechSegments(): List<String> {
+    return this
+        .replace("\r", "\n")
+        .split(Regex("\n{2,}|(?<=[.!?])\\s+"))
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+}
+
+private fun String.isLikelyDialogue(): Boolean {
+    val trimmed = trim()
+    if (trimmed.contains('"') || trimmed.contains('“') || trimmed.contains('”')) return true
+    if (trimmed.startsWith("- ") || trimmed.startsWith("—")) return true
+    val shortLine = trimmed.length in 6..140
+    val punctuationCount = trimmed.count { it == '!' || it == '?' }
+    return shortLine && punctuationCount > 0
+}
+
+private fun EmotionProfile.tuneForSegment(text: String, speakerRole: String): EmotionProfile {
+    var rate = speechRate
+    var tunedPitch = pitch
+    if (text.contains('!')) {
+        rate += 0.03f
+        tunedPitch += 0.05f
+    }
+    if (text.contains("...")) {
+        rate -= 0.05f
+    }
+    if (text.contains('?')) {
+        tunedPitch += 0.03f
+    }
+    if (speakerRole == "characterB") {
+        tunedPitch = (tunedPitch - 0.08f).coerceIn(0.75f, 1.35f)
+    }
+    return EmotionProfile(
+        label = label,
+        speechRate = rate.coerceIn(0.75f, 1.25f),
+        pitch = tunedPitch.coerceIn(0.75f, 1.35f)
+    )
+}
+
+private fun nextVoiceName(current: String?, voices: List<String>): String? {
+    if (voices.isEmpty()) return current
+    if (current == null) return voices.first()
+    val idx = voices.indexOf(current)
+    if (idx < 0) return voices.first()
+    return voices[(idx + 1) % voices.size]
 }
 
 private fun android.speech.tts.Voice.isFemaleLikeVoice(): Boolean {
