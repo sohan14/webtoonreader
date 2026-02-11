@@ -69,8 +69,9 @@ import java.util.Locale
 import kotlin.coroutines.resume
 
 private const val TAG = "WebtoonReader"
-private const val MAX_BITMAP_SIDE = 1200
-private const val MAX_BITMAP_PIXELS = 1_200_000
+private const val MAX_BITMAP_WIDTH = 1440
+private const val MAX_PANEL_HEIGHT = 2200
+private const val MAX_PANEL_PIXELS = 2_200_000
 
 object AppLogStore {
     private const val PREF_NAME = "webtoon_reader_logs"
@@ -133,18 +134,27 @@ class MainActivity : ComponentActivity() {
                 var currentReadingIndex by remember { mutableStateOf(0) }
 
                 fun startReading(fromIndex: Int = 0) {
-                    val speaker = tts ?: return
-                    if (viewModel.state.pages.isEmpty()) return
+                    val speaker = tts
+                    if (speaker == null) {
+                        AppLogStore.append(context, "ERROR", "Read requested but TTS engine is null")
+                        return
+                    }
+                    if (viewModel.state.pages.isEmpty()) {
+                        AppLogStore.append(context, "ERROR", "Read requested but there are no pages loaded")
+                        return
+                    }
                     speaker.stop()
                     viewModel.state.pages.drop(fromIndex).forEachIndexed { idx, page ->
                         val absoluteIndex = fromIndex + idx
                         val text = page.extractedText.ifBlank { "No text found on page ${absoluteIndex + 1}" }
+                        val utteranceId = "page_$absoluteIndex"
                         speaker.speak(
                             "Page ${absoluteIndex + 1}. $text",
                             if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
                             null,
-                            "page_$absoluteIndex"
+                            utteranceId
                         )
+                        AppLogStore.append(context, "INFO", "Queued TTS $utteranceId (textLength=${text.length})")
                     }
                     isSpeaking = true
                     AppLogStore.append(context, "INFO", "Started reading from page ${fromIndex + 1}")
@@ -187,6 +197,7 @@ class MainActivity : ComponentActivity() {
 
                         override fun onDone(utteranceId: String?) {
                             isSpeaking = false
+                            AppLogStore.append(context, "INFO", "TTS finished for $utteranceId")
                         }
 
                         override fun onError(utteranceId: String?) {
@@ -317,19 +328,26 @@ class ReaderViewModel : ViewModel() {
         val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
             decoder.isMutableRequired = false
             val size = info.size
-            val maxSide = maxOf(size.width, size.height)
-            if (maxSide > MAX_BITMAP_SIDE) {
-                val scale = MAX_BITMAP_SIDE.toFloat() / maxSide.toFloat()
+            if (size.width > MAX_BITMAP_WIDTH) {
+                val scale = MAX_BITMAP_WIDTH.toFloat() / size.width.toFloat()
                 decoder.setTargetSize(
                     (size.width * scale).toInt().coerceAtLeast(1),
                     (size.height * scale).toInt().coerceAtLeast(1)
                 )
             }
         }
-        val safeBitmap = resizeBitmapIfNeeded(bitmap, context, "image:${uri.lastPathSegment}")
-        val text = extractText(safeBitmap, context)
-        AppLogStore.append(context, "INFO", "Image parsed: ${uri.lastPathSegment}")
-        listOf(PagePreview(bitmap = safeBitmap, extractedText = text, sourceName = uri.lastPathSegment.orEmpty()))
+
+        val panels = splitBitmapIntoPanels(bitmap, context, "image:${uri.lastPathSegment}")
+        val previews = panels.mapIndexed { idx, panelBitmap ->
+            val text = extractText(panelBitmap, context)
+            PagePreview(
+                bitmap = panelBitmap,
+                extractedText = text,
+                sourceName = "${uri.lastPathSegment} - panel ${idx + 1}/${panels.size}"
+            )
+        }
+        AppLogStore.append(context, "INFO", "Image parsed: ${uri.lastPathSegment}, panels=${previews.size}")
+        previews
     }
 
     private suspend fun readPdf(
@@ -343,9 +361,9 @@ class ReaderViewModel : ViewModel() {
         PdfRenderer(pfd).use { renderer ->
             for (i in 0 until renderer.pageCount) {
                 renderer.openPage(i).use { page ->
-                    val scaleForSide = MAX_BITMAP_SIDE.toFloat() / maxOf(page.width, page.height).toFloat()
-                    val scaleForPixels = kotlin.math.sqrt(MAX_BITMAP_PIXELS.toDouble() / (page.width.toDouble() * page.height.toDouble())).toFloat()
-                    val renderScale = minOf(1f, scaleForSide, scaleForPixels)
+                    val scaleForWidth = MAX_BITMAP_WIDTH.toFloat() / page.width.toFloat()
+                    val scaleForPixels = kotlin.math.sqrt(MAX_PANEL_PIXELS.toDouble() / (page.width.toDouble() * page.height.toDouble())).toFloat()
+                    val renderScale = minOf(1f, scaleForWidth, scaleForPixels)
 
                     val width = (page.width * renderScale).toInt().coerceAtLeast(1)
                     val height = (page.height * renderScale).toInt().coerceAtLeast(1)
@@ -367,12 +385,28 @@ class ReaderViewModel : ViewModel() {
         previews
     }
 
+    private fun splitBitmapIntoPanels(bitmap: Bitmap, context: Context, sourceLabel: String): List<Bitmap> {
+        val panels = mutableListOf<Bitmap>()
+        var offsetY = 0
+        while (offsetY < bitmap.height) {
+            val chunkHeight = minOf(MAX_PANEL_HEIGHT, bitmap.height - offsetY)
+            val panel = Bitmap.createBitmap(bitmap, 0, offsetY, bitmap.width, chunkHeight)
+            val safePanel = resizeBitmapIfNeeded(panel, context, "$sourceLabel:y=$offsetY")
+            panels += safePanel
+            offsetY += chunkHeight
+        }
+        if (panels.size > 1) {
+            AppLogStore.append(context, "INFO", "Split $sourceLabel into ${panels.size} panel(s)")
+        }
+        return panels
+    }
+
     private fun resizeBitmapIfNeeded(bitmap: Bitmap, context: Context, sourceLabel: String): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
-        val sideScale = MAX_BITMAP_SIDE.toFloat() / maxOf(width, height).toFloat()
-        val pixelScale = kotlin.math.sqrt(MAX_BITMAP_PIXELS.toDouble() / (width.toDouble() * height.toDouble())).toFloat()
-        val scale = minOf(1f, sideScale, pixelScale)
+        val widthScale = MAX_BITMAP_WIDTH.toFloat() / width.toFloat()
+        val pixelScale = kotlin.math.sqrt(MAX_PANEL_PIXELS.toDouble() / (width.toDouble() * height.toDouble())).toFloat()
+        val scale = minOf(1f, widthScale, pixelScale)
 
         if (scale >= 1f) return bitmap
 
