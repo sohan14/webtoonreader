@@ -10,7 +10,6 @@ import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,18 +31,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,7 +70,6 @@ import java.util.Date
 import java.util.Locale
 import kotlin.coroutines.resume
 
-private const val TAG = "WebtoonReader"
 private const val MAX_BITMAP_WIDTH = 1440
 private const val MAX_PANEL_HEIGHT = 2200
 private const val MAX_PANEL_PIXELS = 2_200_000
@@ -127,11 +128,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val context = LocalContext.current
-                val scope = rememberCoroutineScope()
                 var tts by remember { mutableStateOf<TextToSpeech?>(null) }
                 var isSpeaking by remember { mutableStateOf(false) }
                 var readerMode by remember { mutableStateOf(false) }
                 var currentReadingIndex by remember { mutableStateOf(0) }
+                var selectedVoiceName by remember { mutableStateOf<String?>(null) }
+                var selectedEmotion by remember { mutableStateOf(emotionProfiles.first()) }
 
                 fun startReading(fromIndex: Int = 0) {
                     val speaker = tts
@@ -143,13 +145,20 @@ class MainActivity : ComponentActivity() {
                         AppLogStore.append(context, "ERROR", "Read requested but there are no pages loaded")
                         return
                     }
+                    speaker.voices
+                        ?.firstOrNull { it.name == selectedVoiceName }
+                        ?.let { speaker.voice = it }
+                    speaker.setSpeechRate(selectedEmotion.speechRate)
+                    speaker.setPitch(selectedEmotion.pitch)
                     speaker.stop()
                     viewModel.state.pages.drop(fromIndex).forEachIndexed { idx, page ->
                         val absoluteIndex = fromIndex + idx
-                        val text = page.extractedText.ifBlank { "No text found on page ${absoluteIndex + 1}" }
+                        val text = page.extractedText
+                            .normalizeForSpeech()
+                            .ifBlank { "No text found." }
                         val utteranceId = "page_$absoluteIndex"
                         speaker.speak(
-                            "Page ${absoluteIndex + 1}. $text",
+                            text,
                             if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
                             null,
                             utteranceId
@@ -171,17 +180,18 @@ class MainActivity : ComponentActivity() {
                     val speaker = TextToSpeech(context) { status ->
                         val current = speakerRef ?: return@TextToSpeech
                         if (status == TextToSpeech.SUCCESS) {
-                            val femaleVoice = current.voices?.firstOrNull {
-                                val name = it.name.lowercase(Locale.getDefault())
-                                name.contains("female") || name.contains("woman") || name.contains("girl")
-                            }
-                            if (femaleVoice != null) {
-                                current.voice = femaleVoice
+                            val femaleVoices = current.voices
+                                ?.filter { it.isFemaleLikeVoice() }
+                                ?.sortedBy { it.name }
+                                .orEmpty()
+                            if (femaleVoices.isNotEmpty()) {
+                                current.voice = femaleVoices.first()
+                                selectedVoiceName = femaleVoices.first().name
                             } else {
                                 current.language = Locale.US
                             }
-                            current.setSpeechRate(0.9f)
-                            current.setPitch(1.08f)
+                            current.setSpeechRate(selectedEmotion.speechRate)
+                            current.setPitch(selectedEmotion.pitch)
                             AppLogStore.append(context, "INFO", "TTS initialized")
                         } else {
                             AppLogStore.append(context, "ERROR", "TTS init failed with status $status")
@@ -215,7 +225,16 @@ class MainActivity : ComponentActivity() {
                 if (!readerMode) {
                     HomeScreen(
                         state = viewModel.state,
+                        selectedVoiceName = selectedVoiceName,
+                        selectedEmotion = selectedEmotion,
+                        availableFemaleVoiceNames = tts?.voices
+                            ?.filter { it.isFemaleLikeVoice() }
+                            ?.map { it.name }
+                            ?.sorted()
+                            .orEmpty(),
                         onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
+                        onSelectVoice = { selectedVoiceName = it },
+                        onSelectEmotion = { selectedEmotion = it },
                         onReadPages = {
                             readerMode = true
                             currentReadingIndex = 0
@@ -239,7 +258,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                     ReaderModeScreen(
                         state = viewModel.state,
-                        currentReadingIndex = currentReadingIndex,
                         isSpeaking = isSpeaking,
                         onBack = {
                             tts?.stop()
@@ -269,6 +287,18 @@ data class PagePreview(
     val bitmap: Bitmap,
     val extractedText: String,
     val sourceName: String
+)
+
+data class EmotionProfile(
+    val label: String,
+    val speechRate: Float,
+    val pitch: Float
+)
+
+private val emotionProfiles = listOf(
+    EmotionProfile("Natural", speechRate = 0.92f, pitch = 1.02f),
+    EmotionProfile("Calm", speechRate = 0.86f, pitch = 0.96f),
+    EmotionProfile("Cheerful", speechRate = 0.98f, pitch = 1.12f)
 )
 
 data class ReaderUiState(
@@ -437,7 +467,12 @@ class ReaderViewModel : ViewModel() {
 @Composable
 private fun HomeScreen(
     state: ReaderUiState,
+    selectedVoiceName: String?,
+    selectedEmotion: EmotionProfile,
+    availableFemaleVoiceNames: List<String>,
     onPickFiles: (List<Uri>) -> Unit,
+    onSelectVoice: (String) -> Unit,
+    onSelectEmotion: (EmotionProfile) -> Unit,
     onReadPages: () -> Unit,
     onShareLogs: () -> Unit,
     onClearLogs: () -> Unit
@@ -454,6 +489,29 @@ private fun HomeScreen(
                 }
                 Button(onClick = onReadPages, enabled = state.pages.isNotEmpty() && !state.loading) {
                     Text("Read Pages")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            if (availableFemaleVoiceNames.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Voice:", fontWeight = FontWeight.Bold)
+                    availableFemaleVoiceNames.take(3).forEach { voiceName ->
+                        Button(onClick = { onSelectVoice(voiceName) }) {
+                            val shortName = voiceName.takeLast(8)
+                            Text(if (voiceName == selectedVoiceName) "✓ $shortName" else shortName)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Emotion:", fontWeight = FontWeight.Bold)
+                emotionProfiles.forEach { profile ->
+                    Button(onClick = { onSelectEmotion(profile) }) {
+                        Text(if (profile == selectedEmotion) "✓ ${profile.label}" else profile.label)
+                    }
                 }
             }
 
@@ -482,7 +540,6 @@ private fun HomeScreen(
 @Composable
 private fun ReaderModeScreen(
     state: ReaderUiState,
-    currentReadingIndex: Int,
     isSpeaking: Boolean,
     onBack: () -> Unit,
     onPlayPause: () -> Unit
@@ -493,19 +550,13 @@ private fun ReaderModeScreen(
         onBack()
     }
 
-    LaunchedEffect(currentReadingIndex, state.pages.size) {
-        if (state.pages.isNotEmpty()) {
-            listState.animateScrollToItem(currentReadingIndex.coerceIn(0, state.pages.lastIndex))
-        }
-    }
-
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(0.dp)
         ) {
-            itemsIndexed(state.pages) { index, page ->
+            itemsIndexed(state.pages) { _, page ->
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Image(
                         bitmap = page.bitmap.asImageBitmap(),
@@ -513,23 +564,33 @@ private fun ReaderModeScreen(
                         modifier = Modifier.fillMaxWidth(),
                         contentScale = ContentScale.FillWidth
                     )
-                    if (index == currentReadingIndex) {
-                        Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
-                            Text(
-                                text = page.extractedText.take(220),
-                                modifier = Modifier.padding(10.dp)
-                            )
-                        }
-                    }
                 }
             }
         }
 
-        Card(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
-            Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onPlayPause) { Text(if (isSpeaking) "Pause" else "Play") }
-                Button(onClick = onBack) { Text("Back") }
-            }
+        SmallFloatingActionButton(
+            onClick = onPlayPause,
+            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+            containerColor = MaterialTheme.colorScheme.primary
+        ) {
+            Icon(
+                imageVector = if (isSpeaking) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (isSpeaking) "Pause" else "Play"
+            )
         }
     }
+}
+
+private fun String.normalizeForSpeech(): String {
+    return lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private fun android.speech.tts.Voice.isFemaleLikeVoice(): Boolean {
+    val token = "$name ${locale.displayName}".lowercase(Locale.getDefault())
+    return token.contains("female") || token.contains("woman") || token.contains("girl") || token.contains("fem")
 }
