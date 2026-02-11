@@ -39,4 +39,4 @@ If build fails, download `build-logs` and check `failure-signature.txt` plus var
 
 Auto-fix workflow: `.github/workflows/android-autofix-pr.yml`
 
-Branch auto-update workflow: `.github/workflows/auto-update-pr-branch.yml`
+Branch auto-update workflow: `.github/workflows/auto-update-pr-branch.yml` (auto-updates current PRs on PR events and updates all open PRs when base branch gets new commits).
