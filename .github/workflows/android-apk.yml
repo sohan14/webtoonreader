@@ -57,45 +57,58 @@ jobs:
           retry sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           sdkmanager --list | sed -n '1,160p'
 
-      - name: Run debug build (capture logs, with retry)
+      - name: Run debug build with automatic fallback variants
         id: build
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ci-logs
-          retry() {
-            local n=0
-            local max=2
-            local delay=10
-            until "$@"; do
-              n=$((n+1))
-              if [ "$n" -ge "$max" ]; then
-                echo "Command failed after $n attempts: $*"
-                return 1
-              fi
-              echo "Retry $n/$max for: $*"
-              sleep "$delay"
-            done
+
+          run_variant() {
+            local name="$1"
+            shift
+            echo "=== Running variant: ${name} ===" | tee "ci-logs/${name}.meta"
+            set +e
+            gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all "$@" 2>&1 | tee "ci-logs/${name}.log"
+            local ec=${PIPESTATUS[0]}
+            set -e
+            return "$ec"
           }
 
-          retry gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
+          if run_variant default; then
+            echo "default" > ci-logs/success-variant.txt
+            exit 0
+          fi
+
+          if run_variant agp842 -PagpVersion=8.4.2 -PkotlinVersion=1.9.24 -PcomposeCompilerVersion=1.5.14; then
+            echo "agp842" > ci-logs/success-variant.txt
+            exit 0
+          fi
+
+          if run_variant agp822 -PagpVersion=8.2.2 -PkotlinVersion=1.9.22 -PcomposeCompilerVersion=1.5.10; then
+            echo "agp822" > ci-logs/success-variant.txt
+            exit 0
+          fi
+
+          echo "none" > ci-logs/success-variant.txt
+          exit 1
 
       - name: Extract failure reason (always)
         if: always()
         shell: bash
         run: |
           mkdir -p ci-logs
-          if [ -f ci-logs/assembleDebug.log ]; then
-            grep -E "^\* What went wrong:|^FAILURE: Build failed|^Caused by:|Received status code|Execution failed for task|Could not resolve" ci-logs/assembleDebug.log | head -n 40 > ci-logs/failure-signature.txt || true
-            {
-              echo "### Build log quick summary"
+          {
+            echo "### Build quick summary"
+            echo ""
+            if [ -f ci-logs/success-variant.txt ]; then
+              echo "Succeeded variant: $(cat ci-logs/success-variant.txt)"
               echo ""
-              echo "Top error lines:"
-              cat ci-logs/failure-signature.txt
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No assembleDebug.log found" > ci-logs/failure-signature.txt
-          fi
+            fi
+            echo "Top error lines:"
+            grep -h -E "^\* What went wrong:|^FAILURE: Build failed|^Caused by:|Received status code|Execution failed for task|Could not resolve" ci-logs/*.log | head -n 60 || true
+          } > ci-logs/failure-signature.txt
+          cat ci-logs/failure-signature.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build logs (always)
         if: always()
@@ -103,7 +116,9 @@ jobs:
         with:
           name: build-logs
           path: |
-            ci-logs/assembleDebug.log
+            ci-logs/*.log
+            ci-logs/*.meta
+            ci-logs/success-variant.txt
             ci-logs/failure-signature.txt
 
       - name: Upload APK artifact
@@ -116,7 +131,7 @@ jobs:
       - name: Build failure summary
         if: failure()
         run: |
-          echo "❌ Build failed. Download build-logs/assembleDebug.log for the exact stacktrace." >> "$GITHUB_STEP_SUMMARY"
+          echo "❌ Build failed. See build-logs artifact (all variant logs + summary)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build success summary
         if: success()
