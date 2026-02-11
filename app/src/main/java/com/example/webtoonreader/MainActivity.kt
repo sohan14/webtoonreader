@@ -3,6 +3,7 @@ package com.example.webtoonreader
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -391,6 +392,8 @@ class ReaderViewModel : ViewModel() {
                     val mimeType = resolver.getType(uri).orEmpty()
                     if (mimeType.contains("pdf")) {
                         pages += readPdf(resolver, uri, context)
+                    } else if (uri.isMhtFile(mimeType)) {
+                        pages += readMht(resolver, uri, context)
                     } else {
                         pages += readImage(resolver, uri, context)
                     }
@@ -476,6 +479,43 @@ class ReaderViewModel : ViewModel() {
         previews
     }
 
+    private suspend fun readMht(
+        resolver: android.content.ContentResolver,
+        uri: Uri,
+        context: Context
+    ): List<PagePreview> = withContext(Dispatchers.IO) {
+        val content = resolver.openInputStream(uri)?.use { input ->
+            input.readBytes().decodeToString()
+        }.orEmpty()
+
+        if (content.isBlank()) {
+            AppLogStore.append(context, "ERROR", "MHT parse failed: empty content for ${uri.lastPathSegment}")
+            return@withContext listOf(
+                PagePreview(
+                    bitmap = createTextPlaceholderBitmap(),
+                    extractedText = "No text detected.",
+                    sourceName = "${uri.lastPathSegment} - mht"
+                )
+            )
+        }
+
+        val extracted = content.extractMhtReadableText().normalizeForSpeech().ifBlank { "No text detected." }
+        AppLogStore.append(context, "INFO", "MHT parsed: ${uri.lastPathSegment}, textLength=${extracted.length}")
+        listOf(
+            PagePreview(
+                bitmap = createTextPlaceholderBitmap(),
+                extractedText = extracted,
+                sourceName = "${uri.lastPathSegment} - mht"
+            )
+        )
+    }
+
+    private fun createTextPlaceholderBitmap(): Bitmap {
+        return Bitmap.createBitmap(1200, 800, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+    }
+
     private fun splitBitmapIntoPanels(bitmap: Bitmap, context: Context, sourceLabel: String): List<Bitmap> {
         val panels = mutableListOf<Bitmap>()
         var offsetY = 0
@@ -551,7 +591,7 @@ private fun HomeScreen(
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }) {
+                Button(onClick = { picker.launch(arrayOf("application/pdf", "image/*", "message/rfc822", "multipart/related", "text/html", "application/octet-stream")) }) {
                     Text("Pick PDF / Images")
                 }
                 Button(onClick = onReadPages, enabled = state.pages.isNotEmpty() && !state.loading) {
@@ -722,6 +762,36 @@ private fun nextVoiceName(current: String?, voices: List<String>): String? {
     val idx = voices.indexOf(current)
     if (idx < 0) return voices.first()
     return voices[(idx + 1) % voices.size]
+}
+
+private fun Uri.isMhtFile(mimeType: String): Boolean {
+    val name = lastPathSegment.orEmpty().lowercase(Locale.getDefault())
+    val type = mimeType.lowercase(Locale.getDefault())
+    return name.endsWith(".mht") ||
+        name.endsWith(".mhtml") ||
+        type.contains("message/rfc822") ||
+        type.contains("multipart/related")
+}
+
+private fun String.extractMhtReadableText(): String {
+    val htmlSections = Regex("(?is)<html.*?>.*?</html>").findAll(this).map { it.value }.toList()
+    val body = if (htmlSections.isNotEmpty()) {
+        htmlSections.joinToString("\n")
+    } else {
+        this
+    }
+
+    return body
+        .replace(Regex("(?is)<script.*?>.*?</script>"), " ")
+        .replace(Regex("(?is)<style.*?>.*?</style>"), " ")
+        .replace(Regex("(?is)<[^>]+>"), " ")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace(Regex("\\s+"), " ")
+        .trim()
 }
 
 private fun android.speech.tts.Voice.isFemaleLikeVoice(): Boolean {
