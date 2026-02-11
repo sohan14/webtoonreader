@@ -10,6 +10,8 @@ jobs:
   verify-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
 
     steps:
       - name: Checkout
@@ -35,21 +37,51 @@ jobs:
           gradle -v
           sdkmanager --version
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages (with retry)
         shell: bash
         run: |
           set -euo pipefail
+          retry() {
+            local n=0
+            local max=3
+            local delay=10
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge "$max" ]; then
+                echo "Command failed after $n attempts: $*"
+                return 1
+              fi
+              echo "Retry $n/$max for: $*"
+              sleep "$delay"
+            done
+          }
+
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          retry sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           sdkmanager --list | sed -n '1,160p'
 
-      - name: Run debug build (capture logs)
+      - name: Run debug build (capture logs, with retry)
         id: build
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ci-logs
-          gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
+          retry() {
+            local n=0
+            local max=2
+            local delay=10
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge "$max" ]; then
+                echo "Command failed after $n attempts: $*"
+                return 1
+              fi
+              echo "Retry $n/$max for: $*"
+              sleep "$delay"
+            done
+          }
+
+          retry gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
 
       - name: Upload build logs (always)
         if: always()
@@ -68,7 +100,7 @@ jobs:
       - name: Build failure summary
         if: failure()
         run: |
-          echo "❌ Build failed. Download the build-logs artifact and inspect assembleDebug.log" >> "$GITHUB_STEP_SUMMARY"
+          echo "❌ Build failed. Download build-logs/assembleDebug.log for the exact stacktrace." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build success summary
         if: success()

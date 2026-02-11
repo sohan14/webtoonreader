@@ -27,8 +27,8 @@ Workflow file: `.github/workflows/android-apk.yml`
 
 On every push/PR (and manual dispatch), the pipeline:
 1. prints Java/Gradle/SDK versions for diagnostics
-2. installs required Android SDK packages
-3. builds `:app:assembleDebug`
+2. installs required Android SDK packages (with retry)
+3. builds `:app:assembleDebug` (with retry)
 4. uploads build logs as `build-logs` (always)
 5. uploads APK as `webtoon-reader-debug-apk` (on success)
 6. writes build status to the workflow summary
