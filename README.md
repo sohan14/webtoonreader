@@ -7,6 +7,7 @@ Android app for reading Webtoon pages from **PDF** or **image files**.
 - Render each page in a long scrolling list.
 - OCR text extraction with ML Kit.
 - Read pages aloud with Android Text-To-Speech (configured to prefer female voices when available).
+- Reader mode with full-width viewport, play/pause bubble controls, and auto-scroll to current spoken page.
 - Error log section in UI for failed file/page processing.
 
 ## Build requirements

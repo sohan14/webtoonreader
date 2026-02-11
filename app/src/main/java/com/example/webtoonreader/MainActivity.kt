@@ -12,12 +12,14 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -27,7 +29,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -35,11 +39,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -74,11 +80,7 @@ object AppLogStore {
     fun installCrashHandler(context: Context) {
         val existing = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            append(
-                context,
-                "CRASH",
-                "${throwable.message}\n${throwable.stackTraceToStringSafe()}"
-            )
+            append(context, "CRASH", "${throwable.message}\n${throwable.stackTraceToStringSafe()}")
             existing?.uncaughtException(thread, throwable)
         }
     }
@@ -127,6 +129,27 @@ class MainActivity : ComponentActivity() {
                 val scope = rememberCoroutineScope()
                 var tts by remember { mutableStateOf<TextToSpeech?>(null) }
                 var isSpeaking by remember { mutableStateOf(false) }
+                var readerMode by remember { mutableStateOf(false) }
+                var currentReadingIndex by remember { mutableStateOf(0) }
+
+                fun startReading(fromIndex: Int = 0) {
+                    val speaker = tts ?: return
+                    if (viewModel.state.pages.isEmpty()) return
+                    speaker.stop()
+                    viewModel.state.pages.drop(fromIndex).forEachIndexed { idx, page ->
+                        val absoluteIndex = fromIndex + idx
+                        val text = page.extractedText.ifBlank { "No text found on page ${absoluteIndex + 1}" }
+                        speaker.speak(
+                            "Page ${absoluteIndex + 1}. $text",
+                            if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                            null,
+                            "page_$absoluteIndex"
+                        )
+                    }
+                    isSpeaking = true
+                    AppLogStore.append(context, "INFO", "Started reading from page ${fromIndex + 1}")
+                    viewModel.refreshLogs(context)
+                }
 
                 DisposableEffect(Unit) {
                     viewModel.refreshLogs(context)
@@ -158,6 +181,8 @@ class MainActivity : ComponentActivity() {
                     speaker.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             isSpeaking = true
+                            val index = utteranceId?.removePrefix("page_")?.toIntOrNull()
+                            if (index != null) currentReadingIndex = index
                         }
 
                         override fun onDone(utteranceId: String?) {
@@ -166,7 +191,6 @@ class MainActivity : ComponentActivity() {
 
                         override fun onError(utteranceId: String?) {
                             isSpeaking = false
-                            Log.e(TAG, "TTS error for $utteranceId")
                             AppLogStore.append(context, "ERROR", "TTS error for $utteranceId")
                         }
                     })
@@ -177,42 +201,54 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                ReaderScreen(
-                    state = viewModel.state,
-                    onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
-                    onReadAll = {
-                        scope.launch {
-                            val speaker = tts ?: return@launch
-                            viewModel.state.pages.forEachIndexed { index, page ->
-                                val text = page.extractedText.ifBlank { "No text found on page ${index + 1}" }
-                                speaker.speak("Page ${index + 1}. $text", TextToSpeech.QUEUE_ADD, null, "page_$index")
+                if (!readerMode) {
+                    HomeScreen(
+                        state = viewModel.state,
+                        onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
+                        onReadPages = {
+                            readerMode = true
+                            currentReadingIndex = 0
+                            startReading(0)
+                        },
+                        onShareLogs = {
+                            val logs = viewModel.state.appLogs
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "WebtoonReader Logs")
+                                putExtra(Intent.EXTRA_TEXT, logs)
                             }
-                            AppLogStore.append(context, "INFO", "Started reading ${viewModel.state.pages.size} pages")
+                            context.startActivity(Intent.createChooser(shareIntent, "Share logs"))
+                        },
+                        onClearLogs = {
+                            AppLogStore.clear(context)
+                            AppLogStore.append(context, "INFO", "Logs cleared")
                             viewModel.refreshLogs(context)
                         }
-                    },
-                    onStopReading = {
-                        tts?.stop()
-                        isSpeaking = false
-                        AppLogStore.append(context, "INFO", "Reading stopped by user")
-                        viewModel.refreshLogs(context)
-                    },
-                    onShareLogs = {
-                        val logs = viewModel.state.appLogs
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "WebtoonReader Logs")
-                            putExtra(Intent.EXTRA_TEXT, logs)
+                    )
+                } else {
+                    ReaderModeScreen(
+                        state = viewModel.state,
+                        currentReadingIndex = currentReadingIndex,
+                        isSpeaking = isSpeaking,
+                        onBack = {
+                            tts?.stop()
+                            isSpeaking = false
+                            readerMode = false
+                            AppLogStore.append(context, "INFO", "Returned to upload/log screen")
+                            viewModel.refreshLogs(context)
+                        },
+                        onPlayPause = {
+                            if (isSpeaking) {
+                                tts?.stop()
+                                isSpeaking = false
+                                AppLogStore.append(context, "INFO", "Reading paused at page ${currentReadingIndex + 1}")
+                            } else {
+                                startReading(currentReadingIndex)
+                            }
+                            viewModel.refreshLogs(context)
                         }
-                        context.startActivity(Intent.createChooser(shareIntent, "Share logs"))
-                    },
-                    onClearLogs = {
-                        AppLogStore.clear(context)
-                        AppLogStore.append(context, "INFO", "Logs cleared")
-                        viewModel.refreshLogs(context)
-                    },
-                    isSpeaking = isSpeaking
-                )
+                    )
+                }
             }
         }
     }
@@ -262,7 +298,6 @@ class ReaderViewModel : ViewModel() {
                     }
                 } catch (ex: Exception) {
                     val msg = "Failed to open $uri: ${ex.message}"
-                    Log.e(TAG, msg, ex)
                     AppLogStore.append(context, "ERROR", "$msg\n${ex.stackTraceToString()}")
                     errors += msg
                 }
@@ -332,7 +367,6 @@ class ReaderViewModel : ViewModel() {
         previews
     }
 
-
     private fun resizeBitmapIfNeeded(bitmap: Bitmap, context: Context, sourceLabel: String): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
@@ -345,14 +379,8 @@ class ReaderViewModel : ViewModel() {
         val targetWidth = (width * scale).toInt().coerceAtLeast(1)
         val targetHeight = (height * scale).toInt().coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
-        if (scaled != bitmap) {
-            bitmap.recycle()
-        }
-        AppLogStore.append(
-            context,
-            "INFO",
-            "Bitmap downscaled for $sourceLabel from ${width}x${height} to ${targetWidth}x${targetHeight}"
-        )
+        if (scaled != bitmap) bitmap.recycle()
+        AppLogStore.append(context, "INFO", "Bitmap downscaled for $sourceLabel from ${width}x${height} to ${targetWidth}x${targetHeight}")
         return scaled
     }
 
@@ -366,7 +394,6 @@ class ReaderViewModel : ViewModel() {
             }
             .addOnFailureListener { e ->
                 recognizer.close()
-                Log.e(TAG, "OCR failed", e)
                 AppLogStore.append(context, "ERROR", "OCR failed: ${e.message}")
                 cont.resume("No text detected.")
             }
@@ -374,19 +401,15 @@ class ReaderViewModel : ViewModel() {
 }
 
 @Composable
-private fun ReaderScreen(
+private fun HomeScreen(
     state: ReaderUiState,
     onPickFiles: (List<Uri>) -> Unit,
-    onReadAll: () -> Unit,
-    onStopReading: () -> Unit,
+    onReadPages: () -> Unit,
     onShareLogs: () -> Unit,
-    onClearLogs: () -> Unit,
-    isSpeaking: Boolean
+    onClearLogs: () -> Unit
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (!uris.isNullOrEmpty()) {
-            onPickFiles(uris)
-        }
+        if (!uris.isNullOrEmpty()) onPickFiles(uris)
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
@@ -395,11 +418,8 @@ private fun ReaderScreen(
                 Button(onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }) {
                     Text("Pick PDF / Images")
                 }
-                Button(onClick = onReadAll, enabled = state.pages.isNotEmpty() && !state.loading) {
+                Button(onClick = onReadPages, enabled = state.pages.isNotEmpty() && !state.loading) {
                     Text("Read Pages")
-                }
-                Button(onClick = onStopReading, enabled = isSpeaking) {
-                    Text("Stop")
                 }
             }
 
@@ -410,39 +430,71 @@ private fun ReaderScreen(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            if (state.loading) {
-                Text("Loading pages and extracting text...")
+            if (state.loading) Text("Loading pages and extracting text...")
+
+            Text("App / Crash Logs:", fontWeight = FontWeight.Bold)
+            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Text(text = state.appLogs, modifier = Modifier.padding(12.dp))
             }
+
             if (state.errorLog.isNotEmpty()) {
                 Text("Processing Errors:", fontWeight = FontWeight.Bold)
                 state.errorLog.forEach { Text("• $it") }
             }
+        }
+    }
+}
 
-            Text("App / Crash Logs:", fontWeight = FontWeight.Bold)
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                Text(
-                    text = state.appLogs,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
+@Composable
+private fun ReaderModeScreen(
+    state: ReaderUiState,
+    currentReadingIndex: Int,
+    isSpeaking: Boolean,
+    onBack: () -> Unit,
+    onPlayPause: () -> Unit
+) {
+    val listState: LazyListState = rememberLazyListState()
 
-            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                itemsIndexed(state.pages) { index, page ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text("Page ${index + 1} - ${page.sourceName}", fontWeight = FontWeight.SemiBold)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Image(
-                                bitmap = page.bitmap.asImageBitmap(),
-                                contentDescription = page.sourceName,
-                                modifier = Modifier.fillMaxWidth(),
-                                contentScale = ContentScale.FillWidth
+    BackHandler(enabled = true) {
+        onBack()
+    }
+
+    LaunchedEffect(currentReadingIndex, state.pages.size) {
+        if (state.pages.isNotEmpty()) {
+            listState.animateScrollToItem(currentReadingIndex.coerceIn(0, state.pages.lastIndex))
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(0.dp)
+        ) {
+            itemsIndexed(state.pages) { index, page ->
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Image(
+                        bitmap = page.bitmap.asImageBitmap(),
+                        contentDescription = page.sourceName,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.FillWidth
+                    )
+                    if (index == currentReadingIndex) {
+                        Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+                            Text(
+                                text = page.extractedText.take(220),
+                                modifier = Modifier.padding(10.dp)
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(page.extractedText)
                         }
                     }
                 }
+            }
+        }
+
+        Card(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+            Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPlayPause) { Text(if (isSpeaking) "Pause" else "Play") }
+                Button(onClick = onBack) { Text("Back") }
             }
         }
     }
