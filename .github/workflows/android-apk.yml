@@ -29,16 +29,25 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Print toolchain info
         run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          java -version
+          gradle -v
+          sdkmanager --version
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager --list_installed | sed -n '1,160p'
 
       - name: Run debug build (capture logs)
         id: build
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p ci-logs
           gradle :app:assembleDebug --stacktrace --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
 
@@ -59,9 +68,9 @@ jobs:
       - name: Build failure summary
         if: failure()
         run: |
-          echo "❌ Build failed. Download the build-logs artifact and inspect assembleDebug.log" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Build failed. Download the build-logs artifact and inspect assembleDebug.log" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build success summary
         if: success()
         run: |
-          echo "✅ Build succeeded. APK artifact: webtoon-reader-debug-apk" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Build succeeded. APK artifact: webtoon-reader-debug-apk" >> "$GITHUB_STEP_SUMMARY"
