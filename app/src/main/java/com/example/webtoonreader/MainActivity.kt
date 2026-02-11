@@ -1,5 +1,7 @@
 package com.example.webtoonreader
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.graphics.pdf.PdfRenderer
@@ -53,22 +55,81 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.coroutines.resume
 
 private const val TAG = "WebtoonReader"
 
+object AppLogStore {
+    private const val PREF_NAME = "webtoon_reader_logs"
+    private const val KEY_LOGS = "logs"
+    private const val MAX_LINES = 400
+
+    fun installCrashHandler(context: Context) {
+        val existing = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            append(
+                context,
+                "CRASH",
+                "${throwable.message}\n${throwable.stackTraceToStringSafe()}"
+            )
+            existing?.uncaughtException(thread, throwable)
+        }
+    }
+
+    fun append(context: Context, level: String, message: String) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        val entry = "[$timestamp][$level] $message"
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getString(KEY_LOGS, "").orEmpty()
+        val merged = (current.lines().filter { it.isNotBlank() } + entry).takeLast(MAX_LINES)
+        prefs.edit().putString(KEY_LOGS, merged.joinToString("\n")).apply()
+    }
+
+    fun getAll(context: Context): String {
+        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LOGS, "No logs yet.")
+            .orEmpty()
+    }
+
+    fun clear(context: Context) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().remove(KEY_LOGS).apply()
+    }
+
+    private fun Throwable.stackTraceToStringSafe(): String {
+        return try {
+            val writer = StringWriter()
+            printStackTrace(PrintWriter(writer))
+            writer.toString()
+        } catch (_: Exception) {
+            toString()
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<ReaderViewModel>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        AppLogStore.installCrashHandler(applicationContext)
+        AppLogStore.append(applicationContext, "INFO", "App launched")
         super.onCreate(savedInstanceState)
+
         setContent {
             MaterialTheme {
                 val context = LocalContext.current
                 val scope = rememberCoroutineScope()
                 var tts by remember { mutableStateOf<TextToSpeech?>(null) }
                 var isSpeaking by remember { mutableStateOf(false) }
+
+                DisposableEffect(Unit) {
+                    viewModel.refreshLogs(context)
+                    onDispose { }
+                }
 
                 DisposableEffect(Unit) {
                     var speakerRef: TextToSpeech? = null
@@ -86,6 +147,9 @@ class MainActivity : ComponentActivity() {
                             }
                             current.setSpeechRate(0.9f)
                             current.setPitch(1.08f)
+                            AppLogStore.append(context, "INFO", "TTS initialized")
+                        } else {
+                            AppLogStore.append(context, "ERROR", "TTS init failed with status $status")
                         }
                     }
                     speakerRef = speaker
@@ -101,6 +165,7 @@ class MainActivity : ComponentActivity() {
                         override fun onError(utteranceId: String?) {
                             isSpeaking = false
                             Log.e(TAG, "TTS error for $utteranceId")
+                            AppLogStore.append(context, "ERROR", "TTS error for $utteranceId")
                         }
                     })
                     tts = speaker
@@ -112,24 +177,37 @@ class MainActivity : ComponentActivity() {
 
                 ReaderScreen(
                     state = viewModel.state,
-                    onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris) },
+                    onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
                     onReadAll = {
                         scope.launch {
                             val speaker = tts ?: return@launch
                             viewModel.state.pages.forEachIndexed { index, page ->
                                 val text = page.extractedText.ifBlank { "No text found on page ${index + 1}" }
-                                speaker.speak(
-                                    "Page ${index + 1}. $text",
-                                    TextToSpeech.QUEUE_ADD,
-                                    null,
-                                    "page_$index"
-                                )
+                                speaker.speak("Page ${index + 1}. $text", TextToSpeech.QUEUE_ADD, null, "page_$index")
                             }
+                            AppLogStore.append(context, "INFO", "Started reading ${viewModel.state.pages.size} pages")
+                            viewModel.refreshLogs(context)
                         }
                     },
                     onStopReading = {
                         tts?.stop()
                         isSpeaking = false
+                        AppLogStore.append(context, "INFO", "Reading stopped by user")
+                        viewModel.refreshLogs(context)
+                    },
+                    onShareLogs = {
+                        val logs = viewModel.state.appLogs
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "WebtoonReader Logs")
+                            putExtra(Intent.EXTRA_TEXT, logs)
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Share logs"))
+                    },
+                    onClearLogs = {
+                        AppLogStore.clear(context)
+                        AppLogStore.append(context, "INFO", "Logs cleared")
+                        viewModel.refreshLogs(context)
                     },
                     isSpeaking = isSpeaking
                 )
@@ -147,62 +225,70 @@ data class PagePreview(
 data class ReaderUiState(
     val pages: List<PagePreview> = emptyList(),
     val loading: Boolean = false,
-    val errorLog: List<String> = emptyList()
+    val errorLog: List<String> = emptyList(),
+    val appLogs: String = "No logs yet."
 )
 
 class ReaderViewModel : ViewModel() {
     var state by mutableStateOf(ReaderUiState())
         private set
 
-    fun loadUris(resolver: android.content.ContentResolver, uris: List<Uri>) {
+    fun refreshLogs(context: Context) {
+        state = state.copy(appLogs = AppLogStore.getAll(context))
+    }
+
+    fun loadUris(resolver: android.content.ContentResolver, uris: List<Uri>, context: Context) {
         viewModelScope.launch {
-            state = state.copy(loading = true, errorLog = emptyList(), pages = emptyList())
+            AppLogStore.append(context, "INFO", "Loading ${uris.size} selected document(s)")
+            state = state.copy(loading = true, errorLog = emptyList(), pages = emptyList(), appLogs = AppLogStore.getAll(context))
             val pages = mutableListOf<PagePreview>()
             val errors = mutableListOf<String>()
 
             uris.forEach { uri ->
                 try {
-                    resolver.takePersistableUriPermission(
-                        uri,
-                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+                    resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 } catch (_: SecurityException) {
-                    // picker may return temporary permission only
+                    AppLogStore.append(context, "INFO", "Temporary URI permission used for $uri")
                 }
 
                 try {
                     val mimeType = resolver.getType(uri).orEmpty()
                     if (mimeType.contains("pdf")) {
-                        pages += readPdf(resolver, uri)
+                        pages += readPdf(resolver, uri, context)
                     } else {
-                        pages += readImage(resolver, uri)
+                        pages += readImage(resolver, uri, context)
                     }
                 } catch (ex: Exception) {
                     val msg = "Failed to open $uri: ${ex.message}"
                     Log.e(TAG, msg, ex)
+                    AppLogStore.append(context, "ERROR", "$msg\n${ex.stackTraceToString()}")
                     errors += msg
                 }
             }
 
-            state = state.copy(loading = false, pages = pages, errorLog = errors)
+            AppLogStore.append(context, "INFO", "Completed load: ${pages.size} page(s), ${errors.size} error(s)")
+            state = state.copy(loading = false, pages = pages, errorLog = errors, appLogs = AppLogStore.getAll(context))
         }
     }
 
     private suspend fun readImage(
         resolver: android.content.ContentResolver,
-        uri: Uri
+        uri: Uri,
+        context: Context
     ): List<PagePreview> = withContext(Dispatchers.IO) {
         val source = ImageDecoder.createSource(resolver, uri)
         val bitmap = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
             decoder.isMutableRequired = false
         }
-        val text = extractText(bitmap)
+        val text = extractText(bitmap, context)
+        AppLogStore.append(context, "INFO", "Image parsed: ${uri.lastPathSegment}")
         listOf(PagePreview(bitmap = bitmap, extractedText = text, sourceName = uri.lastPathSegment.orEmpty()))
     }
 
     private suspend fun readPdf(
         resolver: android.content.ContentResolver,
-        uri: Uri
+        uri: Uri,
+        context: Context
     ): List<PagePreview> = withContext(Dispatchers.IO) {
         val previews = mutableListOf<PagePreview>()
         val pfd: ParcelFileDescriptor = resolver.openFileDescriptor(uri, "r")
@@ -214,7 +300,7 @@ class ReaderViewModel : ViewModel() {
                     val height = page.height * 2
                     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    val text = extractText(bitmap)
+                    val text = extractText(bitmap, context)
                     previews += PagePreview(
                         bitmap = bitmap,
                         extractedText = text,
@@ -224,10 +310,11 @@ class ReaderViewModel : ViewModel() {
             }
         }
         pfd.close()
+        AppLogStore.append(context, "INFO", "PDF parsed: ${uri.lastPathSegment}, pages=${previews.size}")
         previews
     }
 
-    private suspend fun extractText(bitmap: Bitmap): String = suspendCancellableCoroutine { cont ->
+    private suspend fun extractText(bitmap: Bitmap, context: Context): String = suspendCancellableCoroutine { cont ->
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val image = InputImage.fromBitmap(bitmap, 0)
         recognizer.process(image)
@@ -238,6 +325,7 @@ class ReaderViewModel : ViewModel() {
             .addOnFailureListener { e ->
                 recognizer.close()
                 Log.e(TAG, "OCR failed", e)
+                AppLogStore.append(context, "ERROR", "OCR failed: ${e.message}")
                 cont.resume("No text detected.")
             }
     }
@@ -249,6 +337,8 @@ private fun ReaderScreen(
     onPickFiles: (List<Uri>) -> Unit,
     onReadAll: () -> Unit,
     onStopReading: () -> Unit,
+    onShareLogs: () -> Unit,
+    onClearLogs: () -> Unit,
     isSpeaking: Boolean
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -260,9 +350,7 @@ private fun ReaderScreen(
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = {
-                    picker.launch(arrayOf("application/pdf", "image/*"))
-                }) {
+                Button(onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }) {
                     Text("Pick PDF / Images")
                 }
                 Button(onClick = onReadAll, enabled = state.pages.isNotEmpty() && !state.loading) {
@@ -273,13 +361,27 @@ private fun ReaderScreen(
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = onShareLogs) { Text("Share Logs") }
+                Button(onClick = onClearLogs) { Text("Clear Logs") }
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
             if (state.loading) {
                 Text("Loading pages and extracting text...")
             }
             if (state.errorLog.isNotEmpty()) {
-                Text("Logs:", fontWeight = FontWeight.Bold)
+                Text("Processing Errors:", fontWeight = FontWeight.Bold)
                 state.errorLog.forEach { Text("• $it") }
+            }
+
+            Text("App / Crash Logs:", fontWeight = FontWeight.Bold)
+            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Text(
+                    text = state.appLogs,
+                    modifier = Modifier.padding(12.dp)
+                )
             }
 
             LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
