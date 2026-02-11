@@ -1,0 +1,19 @@
+name: Auto Update PR Branch
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-update branch with base
+        uses: peter-evans/update-branch@v4
+        with:
+          pull-request-number: ${{ github.event.pull_request.number }}
+          update-mode: rebase
