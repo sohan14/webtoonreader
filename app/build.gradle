@@ -3,12 +3,12 @@ apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
     namespace 'com.example.webtoonreader'
-    compileSdk 35
+    compileSdk 34
 
     defaultConfig {
         applicationId "com.example.webtoonreader"
         minSdk 26
-        targetSdk 35
+        targetSdk 34
         versionCode 1
         versionName "1.0"
 

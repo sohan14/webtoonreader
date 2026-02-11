@@ -29,13 +29,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
       - name: Run debug build (capture logs)
         id: build
         shell: bash
         run: |
           set -o pipefail
           mkdir -p ci-logs
-          gradle :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee ci-logs/assembleDebug.log
+          gradle :app:assembleDebug --stacktrace --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
 
       - name: Upload build logs (always)
         if: always()

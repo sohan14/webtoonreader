@@ -12,6 +12,7 @@ Android app for reading Webtoon pages from **PDF** or **image files**.
 ## Build requirements
 - JDK 17
 - Gradle 8.7
+- Android SDK Platform 34 + Build-Tools 34.0.0
 
 ## Run locally
 ```bash
