@@ -63,6 +63,8 @@ import java.util.Locale
 import kotlin.coroutines.resume
 
 private const val TAG = "WebtoonReader"
+private const val MAX_BITMAP_SIDE = 1200
+private const val MAX_BITMAP_PIXELS = 1_200_000
 
 object AppLogStore {
     private const val PREF_NAME = "webtoon_reader_logs"
@@ -277,12 +279,22 @@ class ReaderViewModel : ViewModel() {
         context: Context
     ): List<PagePreview> = withContext(Dispatchers.IO) {
         val source = ImageDecoder.createSource(resolver, uri)
-        val bitmap = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+        val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
             decoder.isMutableRequired = false
+            val size = info.size
+            val maxSide = maxOf(size.width, size.height)
+            if (maxSide > MAX_BITMAP_SIDE) {
+                val scale = MAX_BITMAP_SIDE.toFloat() / maxSide.toFloat()
+                decoder.setTargetSize(
+                    (size.width * scale).toInt().coerceAtLeast(1),
+                    (size.height * scale).toInt().coerceAtLeast(1)
+                )
+            }
         }
-        val text = extractText(bitmap, context)
+        val safeBitmap = resizeBitmapIfNeeded(bitmap, context, "image:${uri.lastPathSegment}")
+        val text = extractText(safeBitmap, context)
         AppLogStore.append(context, "INFO", "Image parsed: ${uri.lastPathSegment}")
-        listOf(PagePreview(bitmap = bitmap, extractedText = text, sourceName = uri.lastPathSegment.orEmpty()))
+        listOf(PagePreview(bitmap = safeBitmap, extractedText = text, sourceName = uri.lastPathSegment.orEmpty()))
     }
 
     private suspend fun readPdf(
@@ -296,13 +308,19 @@ class ReaderViewModel : ViewModel() {
         PdfRenderer(pfd).use { renderer ->
             for (i in 0 until renderer.pageCount) {
                 renderer.openPage(i).use { page ->
-                    val width = page.width * 2
-                    val height = page.height * 2
+                    val scaleForSide = MAX_BITMAP_SIDE.toFloat() / maxOf(page.width, page.height).toFloat()
+                    val scaleForPixels = kotlin.math.sqrt(MAX_BITMAP_PIXELS.toDouble() / (page.width.toDouble() * page.height.toDouble())).toFloat()
+                    val renderScale = minOf(1f, scaleForSide, scaleForPixels)
+
+                    val width = (page.width * renderScale).toInt().coerceAtLeast(1)
+                    val height = (page.height * renderScale).toInt().coerceAtLeast(1)
+
                     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    val text = extractText(bitmap, context)
+                    val safeBitmap = resizeBitmapIfNeeded(bitmap, context, "pdf:${uri.lastPathSegment}:page${i + 1}")
+                    val text = extractText(safeBitmap, context)
                     previews += PagePreview(
-                        bitmap = bitmap,
+                        bitmap = safeBitmap,
                         extractedText = text,
                         sourceName = "${uri.lastPathSegment} - page ${i + 1}"
                     )
@@ -312,6 +330,30 @@ class ReaderViewModel : ViewModel() {
         pfd.close()
         AppLogStore.append(context, "INFO", "PDF parsed: ${uri.lastPathSegment}, pages=${previews.size}")
         previews
+    }
+
+
+    private fun resizeBitmapIfNeeded(bitmap: Bitmap, context: Context, sourceLabel: String): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val sideScale = MAX_BITMAP_SIDE.toFloat() / maxOf(width, height).toFloat()
+        val pixelScale = kotlin.math.sqrt(MAX_BITMAP_PIXELS.toDouble() / (width.toDouble() * height.toDouble())).toFloat()
+        val scale = minOf(1f, sideScale, pixelScale)
+
+        if (scale >= 1f) return bitmap
+
+        val targetWidth = (width * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (height * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+        if (scaled != bitmap) {
+            bitmap.recycle()
+        }
+        AppLogStore.append(
+            context,
+            "INFO",
+            "Bitmap downscaled for $sourceLabel from ${width}x${height} to ${targetWidth}x${targetHeight}"
+        )
+        return scaled
     }
 
     private suspend fun extractText(bitmap: Bitmap, context: Context): String = suspendCancellableCoroutine { cont ->

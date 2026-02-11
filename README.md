@@ -45,3 +45,6 @@ Branch auto-update workflow: `.github/workflows/auto-update-pr-branch.yml` (uses
 Note: branch auto-update requires repository Actions permissions to allow write access to contents and pull requests.
 
 If GitHub cannot update a branch (for example conflicts), manual conflict resolution may still be required.
+
+
+The APK includes in-app app/crash logs with Share Logs for debugging crash reports.
