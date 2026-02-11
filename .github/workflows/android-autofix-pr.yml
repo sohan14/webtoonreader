@@ -10,9 +10,13 @@ permissions:
   pull-requests: write
   actions: write
 
+concurrency:
+  group: android-autofix-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
 jobs:
   auto-rerun-once:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 2 }}
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt == 1 }}
     runs-on: ubuntu-latest
     steps:
       - name: Re-run failed jobs once automatically
@@ -26,7 +30,7 @@ jobs:
             });
 
   propose-fix:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt >= 2 }}
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -55,6 +59,13 @@ jobs:
             echo "- Commit: ${{ github.event.workflow_run.head_sha }}"
             echo "- Run attempt: ${{ github.event.workflow_run.run_attempt }}"
             echo ""
+            if [ "${{ github.event.workflow_run.run_attempt }}" = "1" ]; then
+              echo "⚠️ Automatic rerun has been requested for failed jobs."
+              echo ""
+            else
+              echo "❌ Failure persisted after automatic rerun."
+              echo ""
+            fi
             echo "## Failure signature"
             echo '```'
             if [ -f ci-logs/failure-signature.txt ]; then
@@ -79,7 +90,8 @@ jobs:
           body: |
             This PR was automatically generated from a failed **Android CI Build** run.
 
-            The workflow automatically reruns failed jobs once. This PR is created only if failure persists.
+            It captures the failure immediately and is refreshed on every failed run.
+            Failed jobs are automatically re-run once to reduce transient noise.
 
             Please review `ci/auto-fix/latest-failure.md` and apply code/config fixes as needed.
           add-paths: |
