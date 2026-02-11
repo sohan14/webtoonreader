@@ -43,6 +43,7 @@ import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -258,6 +259,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     ReaderModeScreen(
                         state = viewModel.state,
+                        currentReadingIndex = currentReadingIndex,
                         isSpeaking = isSpeaking,
                         onBack = {
                             tts?.stop()
@@ -540,6 +542,7 @@ private fun HomeScreen(
 @Composable
 private fun ReaderModeScreen(
     state: ReaderUiState,
+    currentReadingIndex: Int,
     isSpeaking: Boolean,
     onBack: () -> Unit,
     onPlayPause: () -> Unit
@@ -548,6 +551,12 @@ private fun ReaderModeScreen(
 
     BackHandler(enabled = true) {
         onBack()
+    }
+
+    LaunchedEffect(currentReadingIndex, state.pages.size) {
+        if (state.pages.isNotEmpty()) {
+            listState.animateScrollToItem(currentReadingIndex.coerceIn(0, state.pages.lastIndex))
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -582,11 +591,11 @@ private fun ReaderModeScreen(
 }
 
 private fun String.normalizeForSpeech(): String {
-    return lineSequence()
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .joinToString(" ")
+    return this
+        .replace("\r", " ")
+        .replace("\n", " ")
         .replace(Regex("\\s+"), " ")
+        .replace(Regex("\\s+([,.;:!?])"), "$1")
         .trim()
 }
 
