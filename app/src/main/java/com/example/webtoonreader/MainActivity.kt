@@ -393,22 +393,26 @@ class ReaderViewModel : ViewModel() {
         PdfRenderer(pfd).use { renderer ->
             for (i in 0 until renderer.pageCount) {
                 renderer.openPage(i).use { page ->
-                    val scaleForWidth = MAX_BITMAP_WIDTH.toFloat() / page.width.toFloat()
-                    val scaleForPixels = kotlin.math.sqrt(MAX_PANEL_PIXELS.toDouble() / (page.width.toDouble() * page.height.toDouble())).toFloat()
-                    val renderScale = minOf(1f, scaleForWidth, scaleForPixels)
-
+                    val renderScale = minOf(1f, MAX_BITMAP_WIDTH.toFloat() / page.width.toFloat())
                     val width = (page.width * renderScale).toInt().coerceAtLeast(1)
                     val height = (page.height * renderScale).toInt().coerceAtLeast(1)
 
                     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    val safeBitmap = resizeBitmapIfNeeded(bitmap, context, "pdf:${uri.lastPathSegment}:page${i + 1}")
-                    val text = extractText(safeBitmap, context)
-                    previews += PagePreview(
-                        bitmap = safeBitmap,
-                        extractedText = text,
-                        sourceName = "${uri.lastPathSegment} - page ${i + 1}"
-                    )
+
+                    val panels = splitBitmapIntoPanels(bitmap, context, "pdf:${uri.lastPathSegment}:page${i + 1}")
+                    panels.forEachIndexed { panelIdx, panelBitmap ->
+                        val text = extractText(panelBitmap, context)
+                        previews += PagePreview(
+                            bitmap = panelBitmap,
+                            extractedText = text,
+                            sourceName = if (panels.size > 1) {
+                                "${uri.lastPathSegment} - page ${i + 1} panel ${panelIdx + 1}/${panels.size}"
+                            } else {
+                                "${uri.lastPathSegment} - page ${i + 1}"
+                            }
+                        )
+                    }
                 }
             }
         }
