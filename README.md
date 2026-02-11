@@ -31,6 +31,6 @@ On every push/PR (and manual dispatch), the pipeline:
 3. builds `:app:assembleDebug` (with retry)
 4. uploads build logs as `build-logs` (always)
 5. uploads APK as `webtoon-reader-debug-apk` (on success)
-6. writes build status to the workflow summary
+6. writes build status to the workflow summary with quick error summary lines
 
 If build fails, download `build-logs` and share `assembleDebug.log`.

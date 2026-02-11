@@ -10,9 +10,6 @@ jobs:
   verify-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,6 +93,19 @@ jobs:
         with:
           name: webtoon-reader-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Extract failure reason (always)
+        if: always()
+        shell: bash
+        run: |
+          if [ -f ci-logs/assembleDebug.log ]; then
+            {
+              echo "### Build log quick summary"
+              echo ""
+              echo "Top error lines:"
+              grep -E "^\* What went wrong:|^FAILURE: Build failed|^Caused by:|Received status code|Execution failed for task|Could not resolve" ci-logs/assembleDebug.log | head -n 40 || true
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Build failure summary
         if: failure()
