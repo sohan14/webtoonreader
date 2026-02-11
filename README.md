@@ -39,7 +39,9 @@ If build fails, download `build-logs` and check `failure-signature.txt` plus var
 
 Auto-fix workflow: `.github/workflows/android-autofix-pr.yml`
 
-Branch auto-update workflow: `.github/workflows/auto-update-pr-branch.yml` (auto-updates current PRs on PR events and updates all open PRs when base branch gets new commits).
+Branch auto-update workflow: `.github/workflows/auto-update-pr-branch.yml` (uses GitHub API `pulls.updateBranch` on PR events and base-branch pushes to auto-update PR branches).
 
 
 Note: branch auto-update requires repository Actions permissions to allow write access to contents and pull requests.
+
+If GitHub cannot update a branch (for example conflicts), manual conflict resolution may still be required.

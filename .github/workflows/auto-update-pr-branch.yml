@@ -12,18 +12,26 @@ permissions:
   pull-requests: write
 
 jobs:
-  update-single-pr-branch:
+  update-current-pr-on-pr-events:
     if: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
     steps:
       - name: Show trigger context
         run: echo "event=${{ github.event_name }} pr=${{ github.event.pull_request.number }} base=${{ github.base_ref }}"
 
-      - name: Auto-update current PR branch with base
-        uses: peter-evans/update-branch@v4
+      - name: Request GitHub to update this PR branch
+        uses: actions/github-script@v7
         with:
-          pull-request-number: ${{ github.event.pull_request.number }}
-          update-mode: rebase
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            try {
+              await github.rest.pulls.updateBranch({ owner, repo, pull_number });
+              core.info(`Queued branch update for PR #${pull_number}`);
+            } catch (error) {
+              core.warning(`Could not update PR #${pull_number}: ${error.message}`);
+            }
 
   update-open-pr-branches-on-base-push:
     if: ${{ github.event_name == 'push' }}
