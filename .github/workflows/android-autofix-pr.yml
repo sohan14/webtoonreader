@@ -8,11 +8,25 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: read
+  actions: write
 
 jobs:
+  auto-rerun-once:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 2 }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run failed jobs once automatically
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.reRunWorkflowFailedJobs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+            });
+
   propose-fix:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt >= 2 }}
     runs-on: ubuntu-latest
 
     steps:
@@ -39,6 +53,7 @@ jobs:
             echo "- Trigger: ${{ github.event.workflow_run.event }}"
             echo "- Branch: ${{ github.event.workflow_run.head_branch }}"
             echo "- Commit: ${{ github.event.workflow_run.head_sha }}"
+            echo "- Run attempt: ${{ github.event.workflow_run.run_attempt }}"
             echo ""
             echo "## Failure signature"
             echo '```'
@@ -52,7 +67,7 @@ jobs:
             echo "## Suggested next checks"
             echo "- Verify dependency repository availability (Google/Maven Central)."
             echo "- Verify Android SDK components are installed and licenses accepted."
-            echo "- Inspect full artifact: build-logs/assembleDebug.log"
+            echo "- Inspect full artifact: build-logs/*.log"
           } > ci/auto-fix/latest-failure.md
 
       - name: Create/Update auto-fix PR
@@ -64,7 +79,7 @@ jobs:
           body: |
             This PR was automatically generated from a failed **Android CI Build** run.
 
-            It includes a parsed failure signature and run metadata to speed up debugging.
+            The workflow automatically reruns failed jobs once. This PR is created only if failure persists.
 
             Please review `ci/auto-fix/latest-failure.md` and apply code/config fixes as needed.
           add-paths: |
