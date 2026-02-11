@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          sdkmanager --list_installed | sed -n '1,160p'
+          sdkmanager --list | sed -n '1,160p'
 
       - name: Run debug build (capture logs)
         id: build
@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ci-logs
-          gradle :app:assembleDebug --stacktrace --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
+          gradle :app:assembleDebug --stacktrace --info --no-daemon --warning-mode all 2>&1 | tee ci-logs/assembleDebug.log
 
       - name: Upload build logs (always)
         if: always()
