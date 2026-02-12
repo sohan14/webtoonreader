@@ -80,6 +80,9 @@ import kotlin.coroutines.resume
 private const val MAX_BITMAP_WIDTH = 1440
 private const val MAX_PANEL_HEIGHT = 2200
 private const val MAX_PANEL_PIXELS = 2_200_000
+private const val MIN_CONTENT_SCAN_HEIGHT = 120
+private const val BACKGROUND_MATCH_RATIO = 0.985f
+private const val MAX_HORIZONTAL_CROP_RATIO = 0.22f
 
 object AppLogStore {
     private const val PREF_NAME = "webtoon_reader_logs"
@@ -525,7 +528,8 @@ class ReaderViewModel : ViewModel() {
             val chunkHeight = minOf(MAX_PANEL_HEIGHT, bitmap.height - offsetY)
             val panel = Bitmap.createBitmap(bitmap, 0, offsetY, bitmap.width, chunkHeight)
             val safePanel = resizeBitmapIfNeeded(panel, context, "$sourceLabel:y=$offsetY")
-            panels += safePanel
+            val viewportPanel = cropHorizontalMarginsIfNeeded(safePanel, context, "$sourceLabel:y=$offsetY")
+            panels += viewportPanel
             offsetY += chunkHeight
         }
         if (panels.size > 1) {
@@ -549,6 +553,72 @@ class ReaderViewModel : ViewModel() {
         if (scaled != bitmap) bitmap.recycle()
         AppLogStore.append(context, "INFO", "Bitmap downscaled for $sourceLabel from ${width}x${height} to ${targetWidth}x${targetHeight}")
         return scaled
+    }
+
+    private fun cropHorizontalMarginsIfNeeded(bitmap: Bitmap, context: Context, sourceLabel: String): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 200 || height < MIN_CONTENT_SCAN_HEIGHT) return bitmap
+
+        val sampleRows = minOf(80, height)
+        val yStep = (height / sampleRows).coerceAtLeast(1)
+
+        fun columnIsMostlyWhite(x: Int): Boolean {
+            var sampled = 0
+            var white = 0
+            var y = 0
+            while (y < height) {
+                val pixel = bitmap.getPixel(x, y)
+                sampled++
+                if (Color.red(pixel) >= 248 && Color.green(pixel) >= 248 && Color.blue(pixel) >= 248) white++
+                y += yStep
+            }
+            return sampled > 0 && white.toFloat() / sampled.toFloat() >= BACKGROUND_MATCH_RATIO
+        }
+
+        fun columnIsMostlyBlack(x: Int): Boolean {
+            var sampled = 0
+            var black = 0
+            var y = 0
+            while (y < height) {
+                val pixel = bitmap.getPixel(x, y)
+                sampled++
+                if (Color.red(pixel) <= 12 && Color.green(pixel) <= 12 && Color.blue(pixel) <= 12) black++
+                y += yStep
+            }
+            return sampled > 0 && black.toFloat() / sampled.toFloat() >= BACKGROUND_MATCH_RATIO
+        }
+
+        var left = 0
+        while (left < width / 2 && (columnIsMostlyWhite(left) || columnIsMostlyBlack(left))) {
+            left++
+        }
+
+        var right = width - 1
+        while (right > width / 2 && (columnIsMostlyWhite(right) || columnIsMostlyBlack(right))) {
+            right--
+        }
+
+        if (right <= left) return bitmap
+
+        val cropLeft = left.coerceAtMost((width * MAX_HORIZONTAL_CROP_RATIO).toInt())
+        val maxRightCrop = (width * MAX_HORIZONTAL_CROP_RATIO).toInt()
+        val cropRight = maxOf(cropLeft + 1, right.coerceAtLeast(width - 1 - maxRightCrop))
+
+        val croppedWidth = cropRight - cropLeft + 1
+        if (croppedWidth >= width - 4) {
+            AppLogStore.append(context, "INFO", "Viewport crop skipped for $sourceLabel (no side margins detected, width=$width)")
+            return bitmap
+        }
+
+        val cropped = Bitmap.createBitmap(bitmap, cropLeft, 0, croppedWidth, height)
+        if (cropped != bitmap) bitmap.recycle()
+        AppLogStore.append(
+            context,
+            "INFO",
+            "Viewport crop applied for $sourceLabel from ${width}x${height} to ${croppedWidth}x${height} (left=$cropLeft, rightTrim=${width - 1 - cropRight})"
+        )
+        return cropped
     }
 
     private suspend fun extractText(bitmap: Bitmap, context: Context): String = suspendCancellableCoroutine { cont ->
