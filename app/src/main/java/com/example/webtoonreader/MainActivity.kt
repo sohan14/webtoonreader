@@ -19,8 +19,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,14 +31,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -152,8 +151,8 @@ class MainActivity : ComponentActivity() {
                 var castVoiceBName by remember { mutableStateOf<String?>(null) }
                 var characterCastEnabled by remember { mutableStateOf(true) }
                 var selectedEmotion by remember { mutableStateOf(emotionProfiles.first()) }
-                var selectedAmbience by remember { mutableStateOf(ambienceProfiles.first()) }
                 var currentUtteranceIndex by remember { mutableStateOf(0) }
+                var currentVisiblePanelIndex by remember { mutableStateOf(0) }
 
                 fun startReading(fromUtteranceIndex: Int = 0) {
                     val speaker = tts
@@ -208,23 +207,17 @@ class MainActivity : ComponentActivity() {
                                     utteranceSerial++
                                     return@forEachIndexed
                                 }
-                                val tunedForAmbience = tunedEmotion.withAmbience(selectedAmbience)
-                                speaker.setSpeechRate(tunedForAmbience.speechRate)
-                                speaker.setPitch(tunedForAmbience.pitch)
                                 speaker.speak(
                                     normalized,
                                     if (firstQueued) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
                                     null,
                                     utteranceId
                                 )
-                                if (selectedAmbience.pauseMs > 0) {
-                                    speaker.playSilentUtterance(selectedAmbience.pauseMs, TextToSpeech.QUEUE_ADD, "pause_${utteranceSerial}")
-                                }
                                 firstQueued = false
                                 AppLogStore.append(
                                     context,
                                     "INFO",
-                                    "Queued TTS $utteranceId (textLength=${normalized.length}, role=$speakerRole, voice=${selectedVoiceForSegment ?: "default"}, ambience=${selectedAmbience.label})"
+                                    "Queued TTS $utteranceId (textLength=${normalized.length}, role=$speakerRole, voice=${selectedVoiceForSegment ?: "default"})"
                                 )
                                 utteranceSerial++
                             }
@@ -326,8 +319,6 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleCharacterCast = { characterCastEnabled = it },
                         onSelectEmotion = { selectedEmotion = it },
-                        selectedAmbience = selectedAmbience,
-                        onSelectAmbience = { selectedAmbience = it },
                         onReadPages = {
                             readerMode = true
                             currentReadingIndex = 0
@@ -356,8 +347,9 @@ class MainActivity : ComponentActivity() {
                     ReaderModeScreen(
                         state = viewModel.state,
                         currentReadingIndex = currentReadingIndex,
-                        highlightedPageIndex = currentReadingIndex,
                         isSpeaking = isSpeaking,
+                        currentVisiblePanelIndex = currentVisiblePanelIndex,
+                        onVisiblePanelChanged = { currentVisiblePanelIndex = it },
                         onBack = {
                             tts?.stop()
                             isSpeaking = false
@@ -365,14 +357,21 @@ class MainActivity : ComponentActivity() {
                             AppLogStore.append(context, "INFO", "Returned to upload/log screen")
                             viewModel.refreshLogs(context)
                         },
-                        onPlayPause = {
-                            if (isSpeaking) {
-                                tts?.stop()
-                                isSpeaking = false
-                                AppLogStore.append(context, "INFO", "Reading paused at page ${currentReadingIndex + 1} (utterance=$currentUtteranceIndex)")
-                            } else {
-                                startReading(currentUtteranceIndex)
-                            }
+                        onPause = {
+                            tts?.stop()
+                            isSpeaking = false
+                            AppLogStore.append(context, "INFO", "Reading paused at page ${currentReadingIndex + 1} (utterance=$currentUtteranceIndex)")
+                            viewModel.refreshLogs(context)
+                        },
+                        onResumeFromPaused = {
+                            AppLogStore.append(context, "INFO", "Resume from paused utterance=$currentUtteranceIndex")
+                            startReading(currentUtteranceIndex)
+                            viewModel.refreshLogs(context)
+                        },
+                        onResumeFromCurrentPanel = {
+                            val target = computeUtteranceIndexForPage(viewModel.state.pages, currentVisiblePanelIndex)
+                            AppLogStore.append(context, "INFO", "Resume from current panel ${currentVisiblePanelIndex + 1} -> utterance=$target")
+                            startReading(target)
                             viewModel.refreshLogs(context)
                         }
                     )
@@ -400,18 +399,6 @@ private val emotionProfiles = listOf(
     EmotionProfile("Dramatic", speechRate = 0.98f, pitch = 0.97f)
 )
 
-data class AmbienceProfile(
-    val label: String,
-    val pauseMs: Long,
-    val pitchBoost: Float,
-    val rateBoost: Float
-)
-
-private val ambienceProfiles = listOf(
-    AmbienceProfile("Off", pauseMs = 0L, pitchBoost = 0f, rateBoost = 0f),
-    AmbienceProfile("Cafe", pauseMs = 50L, pitchBoost = 0.01f, rateBoost = 0f),
-    AmbienceProfile("Rain", pauseMs = 90L, pitchBoost = -0.01f, rateBoost = -0.01f),
-    AmbienceProfile("Night", pauseMs = 120L, pitchBoost = -0.02f, rateBoost = -0.02f)
 )
 
 data class ReaderUiState(
@@ -728,8 +715,6 @@ private fun HomeScreen(
     onCycleCastVoiceB: (List<String>) -> Unit,
     onToggleCharacterCast: (Boolean) -> Unit,
     onSelectEmotion: (EmotionProfile) -> Unit,
-    selectedAmbience: AmbienceProfile,
-    onSelectAmbience: (AmbienceProfile) -> Unit,
     onReadPages: () -> Unit,
     showVoiceToggleInHeader: Boolean,
     onShareLogs: () -> Unit,
@@ -782,21 +767,14 @@ private fun HomeScreen(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Emotion:", fontWeight = FontWeight.Bold)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                Text("Voice Profile:", fontWeight = FontWeight.Bold)
                 emotionProfiles.forEach { profile ->
                     Button(onClick = { onSelectEmotion(profile) }) {
                         Text(if (profile == selectedEmotion) "✓ ${profile.label}" else profile.label)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Ambience:", fontWeight = FontWeight.Bold)
-                ambienceProfiles.forEach { profile ->
-                    Button(onClick = { onSelectAmbience(profile) }) {
-                        Text(if (profile == selectedAmbience) "✓ ${profile.label}" else profile.label)
                     }
                 }
             }
@@ -823,12 +801,19 @@ private fun HomeScreen(
     }
 }
 
-private fun EmotionProfile.withAmbience(ambience: AmbienceProfile): EmotionProfile {
-    return EmotionProfile(
-        label = label,
-        speechRate = (speechRate + ambience.rateBoost).coerceIn(0.75f, 1.25f),
-        pitch = (pitch + ambience.pitchBoost).coerceIn(0.75f, 1.35f)
-    )
+private fun computeUtteranceIndexForPage(pages: List<PagePreview>, targetPageIndex: Int): Int {
+    var utteranceIndex = 0
+    val clampedTarget = targetPageIndex.coerceAtLeast(0)
+    pages.forEachIndexed { pageIndex, page ->
+        if (pageIndex >= clampedTarget) return utteranceIndex
+        page.extractedText.extractSpeechSegments().forEach { segment ->
+            val normalized = segment.normalizeForSpeech()
+            if (!normalized.shouldSkipSpeechSegment()) {
+                utteranceIndex++
+            }
+        }
+    }
+    return utteranceIndex
 }
 
 private fun inferSpeakerRole(
@@ -888,10 +873,13 @@ private fun buildSecondPassBitmap(bitmap: Bitmap): Bitmap {
 private fun ReaderModeScreen(
     state: ReaderUiState,
     currentReadingIndex: Int,
-    highlightedPageIndex: Int,
     isSpeaking: Boolean,
+    currentVisiblePanelIndex: Int,
+    onVisiblePanelChanged: (Int) -> Unit,
     onBack: () -> Unit,
-    onPlayPause: () -> Unit
+    onPause: () -> Unit,
+    onResumeFromPaused: () -> Unit,
+    onResumeFromCurrentPanel: () -> Unit
 ) {
     val listState: LazyListState = rememberLazyListState()
 
@@ -905,23 +893,21 @@ private fun ReaderModeScreen(
         }
     }
 
+    LaunchedEffect(listState.firstVisibleItemIndex) {
+        onVisiblePanelChanged(listState.firstVisibleItemIndex)
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().background(ComposeColor.White),
             contentPadding = PaddingValues(0.dp)
         ) {
-            itemsIndexed(state.pages) { index, page ->
-                val highlighted = index == highlightedPageIndex
+            itemsIndexed(state.pages) { _, page ->
                 Column(
                     modifier = Modifier
                         .fillParentMaxWidth()
                         .background(ComposeColor.White)
-                        .border(
-                            width = if (highlighted) 3.dp else 0.dp,
-                            color = if (highlighted) MaterialTheme.colorScheme.primary else ComposeColor.Transparent,
-                            shape = RoundedCornerShape(2.dp)
-                        )
                 ) {
                     Image(
                         bitmap = page.bitmap.asImageBitmap(),
@@ -933,15 +919,27 @@ private fun ReaderModeScreen(
             }
         }
 
-        SmallFloatingActionButton(
-            onClick = onPlayPause,
-            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
-            containerColor = MaterialTheme.colorScheme.primary
-        ) {
-            Icon(
-                imageVector = if (isSpeaking) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (isSpeaking) "Pause" else "Play"
-            )
+        if (isSpeaking) {
+            SmallFloatingActionButton(
+                onClick = onPause,
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                containerColor = MaterialTheme.colorScheme.primary
+            ) {
+                Icon(imageVector = Icons.Filled.Pause, contentDescription = "Pause")
+            }
+        } else {
+            Column(
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(onClick = onResumeFromPaused) { Text("Continue") }
+                Button(onClick = onResumeFromCurrentPanel) { Text("Read Here") }
+                Text(
+                    text = "Panel ${currentVisiblePanelIndex + 1}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
     }
 }
