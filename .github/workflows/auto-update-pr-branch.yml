@@ -1,0 +1,72 @@
+name: Auto Update PR Branch
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-current-pr-on-pr-events:
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show trigger context
+        run: echo "event=${{ github.event_name }} pr=${{ github.event.pull_request.number }} base=${{ github.base_ref }}"
+
+      - name: Request GitHub to update this PR branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            try {
+              await github.rest.pulls.updateBranch({ owner, repo, pull_number });
+              core.info(`Queued branch update for PR #${pull_number}`);
+            } catch (error) {
+              core.warning(`Could not update PR #${pull_number}: ${error.message}`);
+            }
+
+  update-open-pr-branches-on-base-push:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show trigger context
+        run: echo "event=${{ github.event_name }} ref=${{ github.ref }}"
+
+      - name: Update all open PR branches targeting this base
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const base = context.ref.replace('refs/heads/', '');
+
+            const { data: prs } = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base,
+              per_page: 100,
+            });
+
+            core.info(`Found ${prs.length} open PR(s) targeting ${base}`);
+
+            for (const pr of prs) {
+              try {
+                await github.rest.pulls.updateBranch({
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                });
+                core.info(`Queued branch update for PR #${pr.number}`);
+              } catch (error) {
+                core.warning(`Could not update PR #${pr.number}: ${error.message}`);
+              }
+            }
