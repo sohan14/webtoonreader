@@ -165,8 +165,8 @@ class MainActivity : ComponentActivity() {
                         } else {
                             rawSegments.forEachIndexed { segIndex, rawSegment ->
                                 val normalized = rawSegment.normalizeForSpeech()
-                                if (normalized.isBlank()) {
-                                    AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}_seg_${segIndex}: normalized text is blank")
+                                if (normalized.shouldSkipSpeechSegment()) {
+                                    AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}_seg_${segIndex}: filtered non-readable segment")
                                     return@forEachIndexed
                                 }
                                 val isDialogue = rawSegment.isLikelyDialogue()
@@ -280,9 +280,6 @@ class MainActivity : ComponentActivity() {
                             .orEmpty(),
                         onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
                         onSelectVoice = { selectedVoiceName = it },
-                        onToggleVoice = {
-                            selectedVoiceName = nextVoiceName(selectedVoiceName, it)
-                        },
                         onCycleCastVoiceA = {
                             castVoiceAName = nextVoiceName(castVoiceAName, it)
                         },
@@ -296,6 +293,10 @@ class MainActivity : ComponentActivity() {
                             currentReadingIndex = 0
                             startReading(0)
                         },
+                        onToggleVoice = {
+                            selectedVoiceName = nextVoiceName(selectedVoiceName, it)
+                        },
+                        showVoiceToggleInHeader = true,
                         onShareLogs = {
                             val logs = viewModel.state.appLogs
                             val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -554,12 +555,12 @@ class ReaderViewModel : ViewModel() {
         recognizer.process(image)
             .addOnSuccessListener { result ->
                 recognizer.close()
-                cont.resume(result.text.ifBlank { "No text detected." })
+                cont.resume(result.text)
             }
             .addOnFailureListener { e ->
                 recognizer.close()
                 AppLogStore.append(context, "ERROR", "OCR failed: ${e.message}")
-                cont.resume("No text detected.")
+                cont.resume("")
             }
     }
 }
@@ -581,6 +582,7 @@ private fun HomeScreen(
     onToggleCharacterCast: (Boolean) -> Unit,
     onSelectEmotion: (EmotionProfile) -> Unit,
     onReadPages: () -> Unit,
+    showVoiceToggleInHeader: Boolean,
     onShareLogs: () -> Unit,
     onClearLogs: () -> Unit
 ) {
@@ -597,16 +599,18 @@ private fun HomeScreen(
                 Button(onClick = onReadPages, enabled = state.pages.isNotEmpty() && !state.loading) {
                     Text("Read Pages")
                 }
+                if (showVoiceToggleInHeader && availableFemaleVoiceNames.isNotEmpty()) {
+                    Button(onClick = { onToggleVoice(availableFemaleVoiceNames) }) {
+                        Icon(imageVector = Icons.Filled.SwapHoriz, contentDescription = "Toggle voice")
+                        Text("Voice")
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
             if (availableFemaleVoiceNames.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Voice:", fontWeight = FontWeight.Bold)
-                    Button(onClick = { onToggleVoice(availableFemaleVoiceNames) }) {
-                        Icon(imageVector = Icons.Filled.SwapHoriz, contentDescription = "Toggle voice")
-                        Text("Toggle")
-                    }
                     availableFemaleVoiceNames.take(6).forEach { voiceName ->
                         Button(onClick = { onSelectVoice(voiceName) }) {
                             val shortName = voiceName.takeLast(8)
@@ -718,6 +722,17 @@ private fun String.normalizeForSpeech(): String {
         .replace(Regex("\\s+"), " ")
         .replace(Regex("\\s+([,.;:!?])"), "$1")
         .trim()
+}
+
+private fun String.shouldSkipSpeechSegment(): Boolean {
+    val text = trim()
+    if (text.isBlank()) return true
+    val lowered = text.lowercase(Locale.getDefault())
+    if (lowered == "no text detected." || lowered == "no text detected") return true
+    if (lowered == "no text found." || lowered == "no text found") return true
+
+    val alphaNumCount = text.count { it.isLetterOrDigit() }
+    return alphaNumCount < 3
 }
 
 private fun String.extractSpeechSegments(): List<String> {
