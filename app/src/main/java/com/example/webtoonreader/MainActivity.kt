@@ -9,6 +9,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.view.WindowManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
@@ -35,6 +36,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
@@ -127,6 +129,7 @@ class MainActivity : ComponentActivity() {
         AppLogStore.installCrashHandler(applicationContext)
         AppLogStore.append(applicationContext, "INFO", "App launched")
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContent {
             MaterialTheme {
@@ -158,21 +161,14 @@ class MainActivity : ComponentActivity() {
                         val absoluteIndex = fromIndex + idx
                         val rawSegments = page.extractedText.extractSpeechSegments()
                         if (rawSegments.isEmpty()) {
-                            val fallbackText = "No text found."
-                            val utteranceId = "page_${absoluteIndex}_seg_0"
-                            voicesByName[selectedVoiceName]?.let { speaker.voice = it }
-                            speaker.setSpeechRate(selectedEmotion.speechRate)
-                            speaker.setPitch(selectedEmotion.pitch)
-                            speaker.speak(
-                                fallbackText,
-                                if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                                null,
-                                utteranceId
-                            )
-                            AppLogStore.append(context, "INFO", "Queued TTS $utteranceId (textLength=${fallbackText.length}, role=narrator)")
+                            AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}: no text segment found")
                         } else {
                             rawSegments.forEachIndexed { segIndex, rawSegment ->
-                                val normalized = rawSegment.normalizeForSpeech().ifBlank { "No text found." }
+                                val normalized = rawSegment.normalizeForSpeech()
+                                if (normalized.isBlank()) {
+                                    AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}_seg_${segIndex}: normalized text is blank")
+                                    return@forEachIndexed
+                                }
                                 val isDialogue = rawSegment.isLikelyDialogue()
                                 val speakerRole = if (characterCastEnabled && isDialogue) {
                                     val role = if (dialogueTurnIndex % 2 == 0) "characterA" else "characterB"
@@ -284,6 +280,9 @@ class MainActivity : ComponentActivity() {
                             .orEmpty(),
                         onPickFiles = { uris -> viewModel.loadUris(contentResolver, uris, context) },
                         onSelectVoice = { selectedVoiceName = it },
+                        onToggleVoice = {
+                            selectedVoiceName = nextVoiceName(selectedVoiceName, it)
+                        },
                         onCycleCastVoiceA = {
                             castVoiceAName = nextVoiceName(castVoiceAName, it)
                         },
@@ -576,6 +575,7 @@ private fun HomeScreen(
     availableFemaleVoiceNames: List<String>,
     onPickFiles: (List<Uri>) -> Unit,
     onSelectVoice: (String) -> Unit,
+    onToggleVoice: (List<String>) -> Unit,
     onCycleCastVoiceA: (List<String>) -> Unit,
     onCycleCastVoiceB: (List<String>) -> Unit,
     onToggleCharacterCast: (Boolean) -> Unit,
@@ -603,6 +603,10 @@ private fun HomeScreen(
             if (availableFemaleVoiceNames.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Voice:", fontWeight = FontWeight.Bold)
+                    Button(onClick = { onToggleVoice(availableFemaleVoiceNames) }) {
+                        Icon(imageVector = Icons.Filled.SwapHoriz, contentDescription = "Toggle voice")
+                        Text("Toggle")
+                    }
                     availableFemaleVoiceNames.take(6).forEach { voiceName ->
                         Button(onClick = { onSelectVoice(voiceName) }) {
                             val shortName = voiceName.takeLast(8)
