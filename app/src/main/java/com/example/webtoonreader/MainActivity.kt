@@ -19,6 +19,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -687,15 +689,15 @@ private fun ReaderModeScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().background(ComposeColor.White),
             contentPadding = PaddingValues(0.dp)
         ) {
             itemsIndexed(state.pages) { _, page ->
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.fillParentMaxWidth().background(ComposeColor.White)) {
                     Image(
                         bitmap = page.bitmap.asImageBitmap(),
                         contentDescription = page.sourceName,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillParentMaxWidth(),
                         contentScale = ContentScale.FillWidth
                     )
                 }
