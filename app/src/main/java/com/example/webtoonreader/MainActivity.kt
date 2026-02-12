@@ -19,6 +19,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,6 +35,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -83,6 +85,8 @@ private const val MAX_PANEL_PIXELS = 2_200_000
 private const val MIN_CONTENT_SCAN_HEIGHT = 120
 private const val BACKGROUND_MATCH_RATIO = 0.985f
 private const val MAX_HORIZONTAL_CROP_RATIO = 0.22f
+private const val OCR_SECOND_PASS_MIN_SCORE = 14
+
 
 object AppLogStore {
     private const val PREF_NAME = "webtoon_reader_logs"
@@ -148,8 +152,10 @@ class MainActivity : ComponentActivity() {
                 var castVoiceBName by remember { mutableStateOf<String?>(null) }
                 var characterCastEnabled by remember { mutableStateOf(true) }
                 var selectedEmotion by remember { mutableStateOf(emotionProfiles.first()) }
+                var selectedAmbience by remember { mutableStateOf(ambienceProfiles.first()) }
+                var currentUtteranceIndex by remember { mutableStateOf(0) }
 
-                fun startReading(fromIndex: Int = 0) {
+                fun startReading(fromUtteranceIndex: Int = 0) {
                     val speaker = tts
                     if (speaker == null) {
                         AppLogStore.append(context, "ERROR", "Read requested but TTS engine is null")
@@ -162,8 +168,10 @@ class MainActivity : ComponentActivity() {
                     val voicesByName = speaker.voices.orEmpty().associateBy { it.name }
                     speaker.stop()
                     var dialogueTurnIndex = 0
-                    viewModel.state.pages.drop(fromIndex).forEachIndexed { idx, page ->
-                        val absoluteIndex = fromIndex + idx
+                    var utteranceSerial = 0
+                    var firstQueued = true
+                    var previousRole = "narrator"
+                    viewModel.state.pages.forEachIndexed { absoluteIndex, page ->
                         val rawSegments = page.extractedText.extractSpeechSegments()
                         if (rawSegments.isEmpty()) {
                             AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}: no text segment found")
@@ -174,14 +182,16 @@ class MainActivity : ComponentActivity() {
                                     AppLogStore.append(context, "INFO", "Skipped TTS for page_${absoluteIndex}_seg_${segIndex}: filtered non-readable segment")
                                     return@forEachIndexed
                                 }
-                                val isDialogue = rawSegment.isLikelyDialogue()
-                                val speakerRole = if (characterCastEnabled && isDialogue) {
-                                    val role = if (dialogueTurnIndex % 2 == 0) "characterA" else "characterB"
+                                val speakerRole = inferSpeakerRole(
+                                    rawSegment = rawSegment,
+                                    previousRole = previousRole,
+                                    characterCastEnabled = characterCastEnabled,
+                                    dialogueTurnIndex = dialogueTurnIndex
+                                )
+                                if (speakerRole != "narrator") {
                                     dialogueTurnIndex++
-                                    role
-                                } else {
-                                    "narrator"
                                 }
+                                previousRole = speakerRole
                                 val selectedVoiceForSegment = when (speakerRole) {
                                     "characterA" -> castVoiceAName ?: selectedVoiceName
                                     "characterB" -> castVoiceBName ?: selectedVoiceName
@@ -193,23 +203,41 @@ class MainActivity : ComponentActivity() {
                                 speaker.setSpeechRate(tunedEmotion.speechRate)
                                 speaker.setPitch(tunedEmotion.pitch)
 
-                                val utteranceId = "page_${absoluteIndex}_seg_$segIndex"
+                                val utteranceId = "utt_${utteranceSerial}_page_${absoluteIndex}_seg_$segIndex"
+                                if (utteranceSerial < fromUtteranceIndex) {
+                                    utteranceSerial++
+                                    return@forEachIndexed
+                                }
+                                val tunedForAmbience = tunedEmotion.withAmbience(selectedAmbience)
+                                speaker.setSpeechRate(tunedForAmbience.speechRate)
+                                speaker.setPitch(tunedForAmbience.pitch)
                                 speaker.speak(
                                     normalized,
-                                    if (idx == 0 && segIndex == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                                    if (firstQueued) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
                                     null,
                                     utteranceId
                                 )
+                                if (selectedAmbience.pauseMs > 0) {
+                                    speaker.playSilentUtterance(selectedAmbience.pauseMs, TextToSpeech.QUEUE_ADD, "pause_${utteranceSerial}")
+                                }
+                                firstQueued = false
                                 AppLogStore.append(
                                     context,
                                     "INFO",
-                                    "Queued TTS $utteranceId (textLength=${normalized.length}, role=$speakerRole, voice=${selectedVoiceForSegment ?: "default"})"
+                                    "Queued TTS $utteranceId (textLength=${normalized.length}, role=$speakerRole, voice=${selectedVoiceForSegment ?: "default"}, ambience=${selectedAmbience.label})"
                                 )
+                                utteranceSerial++
                             }
                         }
                     }
-                    isSpeaking = true
-                    AppLogStore.append(context, "INFO", "Started reading from page ${fromIndex + 1}")
+                    if (firstQueued) {
+                        isSpeaking = false
+                        AppLogStore.append(context, "INFO", "No readable utterances to queue")
+                    } else {
+                        isSpeaking = true
+                        currentUtteranceIndex = fromUtteranceIndex
+                        AppLogStore.append(context, "INFO", "Started reading from utterance index $fromUtteranceIndex")
+                    }
                     viewModel.refreshLogs(context)
                 }
 
@@ -246,8 +274,13 @@ class MainActivity : ComponentActivity() {
                     speaker.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             isSpeaking = true
+                            val serial = utteranceId
+                                ?.substringAfter("utt_", "")
+                                ?.substringBefore("_page_")
+                                ?.toIntOrNull()
+                            if (serial != null) currentUtteranceIndex = serial
                             val index = utteranceId
-                                ?.substringAfter("page_", "")
+                                ?.substringAfter("_page_", "")
                                 ?.substringBefore("_seg_")
                                 ?.toIntOrNull()
                             if (index != null) currentReadingIndex = index
@@ -293,6 +326,8 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleCharacterCast = { characterCastEnabled = it },
                         onSelectEmotion = { selectedEmotion = it },
+                        selectedAmbience = selectedAmbience,
+                        onSelectAmbience = { selectedAmbience = it },
                         onReadPages = {
                             readerMode = true
                             currentReadingIndex = 0
@@ -321,6 +356,7 @@ class MainActivity : ComponentActivity() {
                     ReaderModeScreen(
                         state = viewModel.state,
                         currentReadingIndex = currentReadingIndex,
+                        highlightedPageIndex = currentReadingIndex,
                         isSpeaking = isSpeaking,
                         onBack = {
                             tts?.stop()
@@ -333,9 +369,9 @@ class MainActivity : ComponentActivity() {
                             if (isSpeaking) {
                                 tts?.stop()
                                 isSpeaking = false
-                                AppLogStore.append(context, "INFO", "Reading paused at page ${currentReadingIndex + 1}")
+                                AppLogStore.append(context, "INFO", "Reading paused at page ${currentReadingIndex + 1} (utterance=$currentUtteranceIndex)")
                             } else {
-                                startReading(currentReadingIndex)
+                                startReading(currentUtteranceIndex)
                             }
                             viewModel.refreshLogs(context)
                         }
@@ -359,9 +395,23 @@ data class EmotionProfile(
 )
 
 private val emotionProfiles = listOf(
-    EmotionProfile("Natural", speechRate = 0.92f, pitch = 1.02f),
-    EmotionProfile("Calm", speechRate = 0.86f, pitch = 0.96f),
-    EmotionProfile("Cheerful", speechRate = 0.98f, pitch = 1.12f)
+    EmotionProfile("Neutral", speechRate = 0.92f, pitch = 1.00f),
+    EmotionProfile("Romance", speechRate = 0.88f, pitch = 1.08f),
+    EmotionProfile("Dramatic", speechRate = 0.98f, pitch = 0.97f)
+)
+
+data class AmbienceProfile(
+    val label: String,
+    val pauseMs: Long,
+    val pitchBoost: Float,
+    val rateBoost: Float
+)
+
+private val ambienceProfiles = listOf(
+    AmbienceProfile("Off", pauseMs = 0L, pitchBoost = 0f, rateBoost = 0f),
+    AmbienceProfile("Cafe", pauseMs = 50L, pitchBoost = 0.01f, rateBoost = 0f),
+    AmbienceProfile("Rain", pauseMs = 90L, pitchBoost = -0.01f, rateBoost = -0.01f),
+    AmbienceProfile("Night", pauseMs = 120L, pitchBoost = -0.02f, rateBoost = -0.02f)
 )
 
 data class ReaderUiState(
@@ -627,7 +677,32 @@ class ReaderViewModel : ViewModel() {
         recognizer.process(image)
             .addOnSuccessListener { result ->
                 recognizer.close()
-                cont.resume(result.text)
+                val firstText = result.text
+                if (!firstText.needsOcrRetry()) {
+                    cont.resume(firstText)
+                    return@addOnSuccessListener
+                }
+
+                AppLogStore.append(context, "INFO", "OCR second pass triggered (score=${firstText.qualityScore()})")
+                val secondBitmap = buildSecondPassBitmap(bitmap)
+                val secondRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                secondRecognizer.process(InputImage.fromBitmap(secondBitmap, 0))
+                    .addOnSuccessListener { secondResult ->
+                        secondRecognizer.close()
+                        val secondText = secondResult.text
+                        val firstScore = firstText.qualityScore()
+                        val secondScore = secondText.qualityScore()
+                        val chosen = if (secondScore > firstScore) secondText else firstText
+                        AppLogStore.append(context, "INFO", "OCR second pass result firstScore=$firstScore secondScore=$secondScore chosen=${if (secondScore > firstScore) "second" else "first"}")
+                        secondBitmap.recycle()
+                        cont.resume(chosen)
+                    }
+                    .addOnFailureListener { secondError ->
+                        secondRecognizer.close()
+                        secondBitmap.recycle()
+                        AppLogStore.append(context, "ERROR", "OCR second pass failed: ${secondError.message}")
+                        cont.resume(firstText)
+                    }
             }
             .addOnFailureListener { e ->
                 recognizer.close()
@@ -653,6 +728,8 @@ private fun HomeScreen(
     onCycleCastVoiceB: (List<String>) -> Unit,
     onToggleCharacterCast: (Boolean) -> Unit,
     onSelectEmotion: (EmotionProfile) -> Unit,
+    selectedAmbience: AmbienceProfile,
+    onSelectAmbience: (AmbienceProfile) -> Unit,
     onReadPages: () -> Unit,
     showVoiceToggleInHeader: Boolean,
     onShareLogs: () -> Unit,
@@ -715,6 +792,16 @@ private fun HomeScreen(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Ambience:", fontWeight = FontWeight.Bold)
+                ambienceProfiles.forEach { profile ->
+                    Button(onClick = { onSelectAmbience(profile) }) {
+                        Text(if (profile == selectedAmbience) "✓ ${profile.label}" else profile.label)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = onShareLogs) { Text("Share Logs") }
                 Button(onClick = onClearLogs) { Text("Clear Logs") }
@@ -736,10 +823,72 @@ private fun HomeScreen(
     }
 }
 
+private fun EmotionProfile.withAmbience(ambience: AmbienceProfile): EmotionProfile {
+    return EmotionProfile(
+        label = label,
+        speechRate = (speechRate + ambience.rateBoost).coerceIn(0.75f, 1.25f),
+        pitch = (pitch + ambience.pitchBoost).coerceIn(0.75f, 1.35f)
+    )
+}
+
+private fun inferSpeakerRole(
+    rawSegment: String,
+    previousRole: String,
+    characterCastEnabled: Boolean,
+    dialogueTurnIndex: Int
+): String {
+    if (!characterCastEnabled) return "narrator"
+    val trimmed = rawSegment.trim()
+    val explicitA = Regex("^(a|speaker a|male|boy)\\s*[:-]", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
+    val explicitB = Regex("^(b|speaker b|female|girl)\\s*[:-]", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
+    if (explicitA) return "characterA"
+    if (explicitB) return "characterB"
+    if (!trimmed.isLikelyDialogue()) return "narrator"
+
+    val hasOpeningQuote = trimmed.contains('"') || trimmed.contains('“')
+    val hasClosingQuote = trimmed.contains('"') || trimmed.contains('”')
+    if (hasOpeningQuote && !hasClosingQuote && previousRole != "narrator") return previousRole
+
+    return if (dialogueTurnIndex % 2 == 0) "characterA" else "characterB"
+}
+
+private fun String.qualityScore(): Int {
+    val words = split(Regex("\\s+")).count { it.any(Char::isLetterOrDigit) }
+    val alphaNum = count { it.isLetterOrDigit() }
+    return words * 2 + alphaNum
+}
+
+private fun String.needsOcrRetry(): Boolean {
+    val score = qualityScore()
+    return score < OCR_SECOND_PASS_MIN_SCORE
+}
+
+private fun buildSecondPassBitmap(bitmap: Bitmap): Bitmap {
+    val scaled = if (bitmap.width < 1800) {
+        val scale = (1800f / bitmap.width.toFloat()).coerceAtMost(1.45f)
+        Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+    } else {
+        bitmap
+    }
+
+    val thresholded = Bitmap.createBitmap(scaled.width, scaled.height, Bitmap.Config.ARGB_8888)
+    for (y in 0 until scaled.height) {
+        for (x in 0 until scaled.width) {
+            val px = scaled.getPixel(x, y)
+            val gray = (Color.red(px) * 0.3f + Color.green(px) * 0.59f + Color.blue(px) * 0.11f).toInt()
+            val out = if (gray > 180) 255 else 0
+            thresholded.setPixel(x, y, Color.rgb(out, out, out))
+        }
+    }
+    if (scaled != bitmap) scaled.recycle()
+    return thresholded
+}
+
 @Composable
 private fun ReaderModeScreen(
     state: ReaderUiState,
     currentReadingIndex: Int,
+    highlightedPageIndex: Int,
     isSpeaking: Boolean,
     onBack: () -> Unit,
     onPlayPause: () -> Unit
@@ -762,8 +911,18 @@ private fun ReaderModeScreen(
             modifier = Modifier.fillMaxSize().background(ComposeColor.White),
             contentPadding = PaddingValues(0.dp)
         ) {
-            itemsIndexed(state.pages) { _, page ->
-                Column(modifier = Modifier.fillParentMaxWidth().background(ComposeColor.White)) {
+            itemsIndexed(state.pages) { index, page ->
+                val highlighted = index == highlightedPageIndex
+                Column(
+                    modifier = Modifier
+                        .fillParentMaxWidth()
+                        .background(ComposeColor.White)
+                        .border(
+                            width = if (highlighted) 3.dp else 0.dp,
+                            color = if (highlighted) MaterialTheme.colorScheme.primary else ComposeColor.Transparent,
+                            shape = RoundedCornerShape(2.dp)
+                        )
+                ) {
                     Image(
                         bitmap = page.bitmap.asImageBitmap(),
                         contentDescription = page.sourceName,
